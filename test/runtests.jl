@@ -2361,6 +2361,28 @@ end
     @test format_lines(str, 1:4) == "f(\n    x;\n    a = 1,\n)\n"
     str = "g(\n    f(x, a = 1),\n    f(y, b = 2),\n)\n"
     @test format_lines(str, 2:2) == "g(\n    f(x; a = 1),\n    f(y, b = 2),\n)\n"
+    # A range that starts or ends inside a multiline string or command literal is
+    # extended to the whole literal: the range markers must not become part of the
+    # literal's content (where they change the indentation stripped from it)
+    for (opening, closing) in (("\"\"\"", "\"\"\""), ("raw\"\"\"", "\"\"\""), ("```", "```"))
+        str = "begin\n    s = $(opening)\n    a\n    b\n    c\n    $(closing)\nend\n"
+        for lines in (1:1, 2:2, 3:3, 4:4, 5:5, 6:6, 7:7, 3:5, 4:7, [2:2, 4:4], [3:3, 5:5])
+            @test format_lines(str, lines) == str
+        end
+    end
+    str = "begin\n    s = \"\"\"\n    a\n\n    b\n    \"\"\"\nend\n"
+    @test format_lines(str, 4:4) == str
+    @test format_lines(str, 5:5) == str
+    # The literal is formatted as a unit, like when formatting the whole file
+    str = "begin\n    s = \"\"\"\n      a\n      b\n      \"\"\"\nend\n"
+    @test format_lines(str, 4:4) == format_string(str) ==
+        "begin\n    s = \"\"\"\n    a\n    b\n    \"\"\"\nend\n"
+    # Other lines in the range are still formatted, lines outside of it are not
+    str = "begin\n    x=1\n    s = \"\"\"\n    a\n    \"\"\"; y=2\n    z=3\nend\n"
+    @test format_lines(str, 4:4) == "begin\n    x=1\n    s = \"\"\"\n    a\n    \"\"\"; y = 2\n    z=3\nend\n"
+    # Literals nested in an interpolation: the outer literal is the unit
+    str = "begin\n    s = \"\"\"\n    a\n    \$(\"\"\"\n    b\n    \"\"\")\n    c\n    \"\"\"\nend\n"
+    @test format_lines(str, 5:5) == format_lines(str, 7:7) == format_string(str)
 end
 
 @testset "docstrings" begin

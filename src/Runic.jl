@@ -220,6 +220,87 @@ function validate_line_ranges(lines::Vector{String}, line_ranges::Vector{UnitRan
     return
 end
 
+# Return the (first line, last line) spans of the string and command literals in `str`
+# that cover more than one line.
+function multiline_literal_line_spans(str::String)
+    spans = Tuple{Int, Int}[]
+    tree = try
+        Node(
+            JuliaSyntax.parseall(
+                JuliaSyntax.GreenNode, str; ignore_warnings = true, version = v"2-"
+            )
+        )
+    catch
+        # Parse errors are reported when the source with the markers is parsed
+        return spans
+    end
+    line_starts = Int[1]
+    for (i, byte) in pairs(codeunits(str))
+        byte == UInt8('\n') && push!(line_starts, i + 1)
+    end
+    line_of(pos) = searchsortedlast(line_starts, pos)
+    function collect_spans(node::Node, pos::Int)
+        if kind(node) in KSet"string cmdstring"
+            first_line, last_line = line_of(pos), line_of(pos + span(node) - 1)
+            if last_line > first_line
+                push!(spans, (first_line, last_line))
+            end
+            # Literals nested in interpolations are within the span of this one
+            return
+        end
+        is_leaf(node) && return
+        for kid in verified_kids(node)
+            collect_spans(kid, pos)
+            pos += span(kid)
+        end
+        return
+    end
+    collect_spans(tree, 1)
+    return spans
+end
+
+# The range markers are inserted as comments on lines of their own. A marker line that
+# ends up inside a multiline string or command literal is not a comment but part of the
+# literal: for a triple-quoted literal it changes the indentation that is stripped from
+# the content lines, so formatting would re-indent the selected lines of the literal and
+# change its value. Extend ranges that start or end inside such a literal to cover the
+# whole literal so that the markers stay outside of it and the literal is formatted as a
+# unit.
+function extend_line_ranges_over_multiline_literals!(str, line_ranges)
+    spans = multiline_literal_line_spans(str)
+    isempty(spans) && return line_ranges
+    for (i, r) in pairs(line_ranges)
+        a, b = first(r), last(r)
+        extended = true
+        while extended
+            extended = false
+            for (s, e) in spans
+                # The begin marker is inserted before line a, the end marker after line b
+                if s < a <= e
+                    a = s
+                    extended = true
+                end
+                if s <= b < e
+                    b = e
+                    extended = true
+                end
+            end
+        end
+        line_ranges[i] = a:b
+    end
+    # Merge ranges that overlap after being extended
+    sort!(line_ranges; by = first)
+    merged = UnitRange{Int}[]
+    for r in line_ranges
+        if !isempty(merged) && first(r) <= last(merged[end])
+            merged[end] = first(merged[end]):max(last(merged[end]), last(r))
+        else
+            push!(merged, r)
+        end
+    end
+    return copy!(line_ranges, merged)
+end
+
 function add_line_range_markers(str, line_ranges, begin_marker, end_marker)
     lines = collect_lines(IOBuffer(str); keep = true)
     validate_line_ranges(lines, line_ranges)
@@ -229,6 +310,7 @@ function add_line_range_markers(str, line_ranges, begin_marker, end_marker)
         empty!(line_ranges)
         return str
     end
+    extend_line_ranges_over_multiline_literals!(str, line_ranges)
     sort!(line_ranges; rev = true)
     for r in line_ranges
         a, b = first(r), last(r)
