@@ -3,14 +3,14 @@
   "line": {
     "repo": "nsiccha/Runic.jl",
     "ref": "dogfood",
-    "sha": "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a"
+    "sha": "2d4fd57f7d7b47e9c35d6495c28cf3e39aa3d580"
   },
   "upstream": {
     "repo": "fredrikekre/Runic.jl",
-    "ref": "v1.11.1",
-    "sha": "20e05bdd7ad00774cd1dee66d0bc82a16515952c"
+    "ref": "master",
+    "sha": "d65f5485e7c6f695315e86392691cce6eb6dd629"
   },
-  "prepared_at": "2026-11-18T12:00:08Z",
+  "prepared_at": "2026-11-18T14:17:20Z",
   "problems": [
     {
       "id": "multiline-range",
@@ -28,18 +28,28 @@
         "branch": "dogfood",
         "commits": [
           {
-            "sha": "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a",
+            "sha": "62cd1e0e9a664e0a027ef67e09fb432c3dd9ce26",
             "title": "Expand format ranges to cover whole multiline literals",
             "original": [
-              "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a"
+              "62cd1e0e9a664e0a027ef67e09fb432c3dd9ce26"
             ]
           }
         ],
-        "why_together": "The release backport includes the formatter change and regression tests. The master-based topic commit adds the same source and test lines on that base."
+        "why_together": "One commit on upstream master combines the formatter change and its regression tests. The dogfood merge has exactly that tree and also retains the earlier 1.11.1 backport in its history."
       },
       "depends_on": [],
       "requires": [],
       "validation": [
+        {
+          "base": "d65f5485e7c6f695315e86392691cce6eb6dd629",
+          "julia": "1.10.12",
+          "tests": [
+            "test/runtests.jl (complete, including --lines and git-runic integration)",
+            "CLI --lines=4:4 on the multiline-string example in issue #260"
+          ],
+          "result": "passed",
+          "detail": "12,927 assertions passed and 16 were marked broken. All 52 range-formatting checks passed. Unpatched master added four spaces to the selected string line. The merge preserved the file byte-for-byte. Tested dogfood commit 2d4fd57f7d7b47e9c35d6495c28cf3e39aa3d580."
+        },
         {
           "base": "20e05bdd7ad00774cd1dee66d0bc82a16515952c",
           "tests": [
@@ -52,8 +62,8 @@
       ],
       "draft": {
         "title": "Formatting one line inside a multiline literal changes its value",
-        "body": "Save this file as `literal.jl` using the indentation shown.\n\n```julia\nbegin\n    s = \"\"\"\n    a\n    b\n    c\n    \"\"\"\nend\n```\n\nRun `runic --lines=4:4 --diff literal.jl` with unpatched Runic 1.11.1. Only the line containing `b` gains indentation. Applying the edit changes the value of `s`, and formatting the same line again shifts it further. The expected diff for this file is empty.\n\nExpand a selected range to the boundaries of any enclosing multiline string or command before inserting formatting markers. This keeps markers outside literal contents. Upstream issue #260 tracks the behavior.",
-        "prepared_at": "2026-11-18T12:00:08Z"
+        "body": "Save this file as `literal.jl` using the indentation shown.\n\n```julia\nbegin\n    s = \"\"\"\n    a\n    b\n    c\n    \"\"\"\nend\n```\n\nRun `runic --lines=4:4 --diff literal.jl` with unpatched Runic 1.11.1 or upstream master at `d65f5485e`. Only the line containing `b` gains indentation. Applying the edit changes the value of `s`, and formatting the same line again shifts it further. The expected diff for this file is empty.\n\nExpand a selected range to the boundaries of any enclosing multiline string or command before inserting formatting markers. This keeps markers outside literal contents. Upstream issue #260 tracks the behavior.",
+        "prepared_at": "2026-11-18T14:17:20Z"
       }
     }
   ]
