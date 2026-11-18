@@ -259,7 +259,10 @@ end
 
 @testset "whitespace between operators" begin
     for sp in ("", " ", "  ")
-        for op in ("+", "-", "==", "!=", "===", "!==", "<", "<=", ".+", ".==")
+        for op in (
+                "+", "-", "==", "!=", "===", "!==", "<", "<=", ".+", ".==",
+                "&&", "||", ".&&", ".||", "-->",
+            )
             # a op b
             @test format_string("$(sp)a$(sp)$(op)$(sp)b$(sp)") ==
                 "$(sp)a $(op) b$(sp)"
@@ -301,6 +304,25 @@ end
             "$(sp)(1 + 2):(1 + 3):(1 + 4)$(sp)"
         # a^b
         @test format_string("$(sp)a$(sp)^$(sp)b$(sp)") == "$(sp)a^b$(sp)"
+        # Splat
+        @test format_string("$(sp)f(x$(sp)...)$(sp)") == "$(sp)f(x...)$(sp)"
+        @test format_string("$(sp)f(a, b$(sp)...; c$(sp)...)$(sp)") == "$(sp)f(a, b...; c...)$(sp)"
+        @test format_string("$(sp)[x$(sp)...]$(sp)") == "$(sp)[x...]$(sp)"
+        # Field access and import paths
+        for nl in (sp, "\n", "\n    ")
+            nl == "" && continue
+            @test format_string("$(sp)a.$(nl)b$(sp)") == "$(sp)a.b$(sp)"
+            @test format_string("$(sp)a.b.$(nl)c$(sp)") == "$(sp)a.b.c$(sp)"
+            @test format_string("$(sp)a.$(nl)f()$(sp)") == "$(sp)a.f()$(sp)"
+            @test format_string("$(sp)Base.$(nl):+$(sp)") == "$(sp)Base.:+$(sp)"
+            @test format_string("function A.$(nl)f()\nend") == "function A.f()\nend"
+            @test format_string("import A.$(nl)B") == "import A.B"
+            @test format_string("using A.$(nl)B, C.$(nl)D") == "using A.B, C.D"
+            @test format_string("using ..$(nl)A") == "using ..A"
+        end
+        # Comments after `.` are left alone
+        @test format_string("a. # c\nb") == "a. # c\nb"
+        @test format_string("a. #= c =# b") == "a. #= c =# b"
         # Edgecase when formatting whitespace in the next leaf, when the next leaf is a
         # grand child or even younger. Note that this test depends a bit on where
         # JuliaSyntax.jl decides to place the K"Whitespace" node.
@@ -315,6 +337,14 @@ end
         # Edgecase with call-call-newline as a leading sequence
         @test format_string("(\na$(sp)*$(sp)b$(sp)=>$(sp)c,\n)") == "(\n    a * b => c,\n)"
     end
+    # Prefix operators: multiple spaces are collapsed to one (but not removed)
+    for op in ("-", "+", "!", "√", ".-"), sp in ("", " ", "  ")
+        @test format_string("$(op)$(sp)x") == "$(op)$(sp == "" ? "" : " ")x"
+        @test format_string("y = $(op)$(sp)x") == "y = $(op)$(sp == "" ? "" : " ")x"
+        @test format_string("f($(op)$(sp)x)") == "f($(op)$(sp == "" ? "" : " ")x)"
+    end
+    @test format_string("-  (a + b)") == "- (a + b)"
+    @test format_string("-  1") == "- 1"
 end
 
 @testset "spaces in listlike" begin
@@ -333,8 +363,10 @@ end
                 "$(o)$(a), #==# $(b)$(c)"
             @test format_string("$(o)$(sp)$(a) #==#,$(sp)$(b)$(sp)$(c)") ==
                 "$(o)$(a) #==#, $(b)$(c)"
+            # `a = 1` is a keyword argument in calls and is moved after a `;`
+            kw = o in ("f(", "f.(") && a == "a" ? "; " : ""
             @test format_string("$(o)$(sp)$(a)#==# = 1$(sp)$(c)") ==
-                "$(o)$(a) #==# = 1$(c)"
+                "$(o)$(kw)$(a) #==# = 1$(c)"
             # line break in between items
             @test format_string("$(o)$(sp)$(a)$(sp),\n$(sp)$(b)$(sp)$(c)") ==
                 "$(o)\n    $(a),\n    $(b)$(tr)\n$(c)"
@@ -439,9 +471,9 @@ end
     end
     # Splatting
     for sp in ("", " ", "  ")
-        @test format_string("($(sp)a$(sp)...,$(sp))") == "(a$(sp)...,)"
-        @test format_string("f($(sp)a$(sp)...,$(sp))") == "f(a$(sp)...)"
-        @test format_string("f($(sp)a$(sp)...;$(sp)b$(sp)...$(sp))") == "f(a$(sp)...; b$(sp)...)"
+        @test format_string("($(sp)a$(sp)...,$(sp))") == "(a...,)"
+        @test format_string("f($(sp)a$(sp)...,$(sp))") == "f(a...)"
+        @test format_string("f($(sp)a$(sp)...;$(sp)b$(sp)...$(sp))") == "f(a...; b...)"
     end
     # Named tuples
     for sp in ("", " ", "  "), a in ("a", "a = 1")
@@ -527,6 +559,51 @@ end
     @test format_string("[ # a\n]") == "[ # a\n]"
     # https://github.com/fredrikekre/Runic.jl/issues/151
     @test format_string("(\n    a, b for b in B\n)") == "(\n    a, b for b in B\n)"
+    # Iteration specifications in for loops and generators
+    # https://github.com/fredrikekre/Runic.jl/issues/236
+    for sp in ("", " ", "  "), op in ("in", "=", "∈")
+        csp = sp == "" ? " " : sp # at least one space before comment (but more allowed)
+        @test format_string("for i $(op) I$(sp),$(sp)j $(op) J\nend") ==
+            "for i in I, j in J\nend"
+        @test format_string("for i $(op) I$(sp),$(sp)j $(op) J$(sp),$(sp)k $(op) K\nend") ==
+            "for i in I, j in J, k in K\nend"
+        @test format_string("for (i, j) $(op) I$(sp),$(sp)k $(op) K\nend") ==
+            "for (i, j) in I, k in K\nend"
+        for (l, r) in (("[", "]"), ("(", ")"), ("T[", "]"))
+            @test format_string("$(l)i for i $(op) I$(sp),$(sp)j $(op) J$(r)") ==
+                "$(l)i for i in I, j in J$(r)"
+            @test format_string("$(l)i for i $(op) I$(sp),$(sp)j $(op) J$(sp),$(sp)k $(op) K$(r)") ==
+                "$(l)i for i in I, j in J, k in K$(r)"
+            @test format_string("$(l)i for i $(op) I for j $(op) J$(sp),$(sp)k $(op) K$(r)") ==
+                "$(l)i for i in I for j in J, k in K$(r)"
+            @test format_string("$(l)i for i $(op) I$(sp),$(sp)j $(op) J if i < j$(r)") ==
+                "$(l)i for i in I, j in J if i < j$(r)"
+        end
+        # multiline
+        @test format_string("for i $(op) I$(sp),\n    j $(op) J\n    x\nend") ==
+            "for i in I,\n        j in J\n    x\nend"
+        @test format_string("[\n    i for i $(op) I$(sp),\n    j $(op) J\n]") ==
+            "[\n    i for i in I,\n        j in J\n]"
+        # comments
+        @test format_string("for i $(op) I$(sp),$(sp)# c\n    j $(op) J\n    x\nend") ==
+            "for i in I,$(csp)# c\n        j in J\n    x\nend"
+        @test format_string("for i $(op) I$(sp),$(sp)j $(op) J # c\nend") ==
+            "for i in I, j in J # c\nend"
+    end
+    # Spaces around `for` and `if` in generators and comprehensions
+    for sp in (" ", "  "), (l, r) in (("[", "]"), ("(", ")"), ("T[", "]"), ("f(", ")"))
+        @test format_string("$(l)i$(sp)for$(sp)i in I$(r)") == "$(l)i for i in I$(r)"
+        @test format_string("$(l)i$(sp)for$(sp)i in I$(sp)if$(sp)i$(r)") ==
+            "$(l)i for i in I if i$(r)"
+        @test format_string("$(l)i$(sp)for$(sp)i in I$(sp)for$(sp)j in J$(sp)if$(sp)j$(r)") ==
+            "$(l)i for i in I for j in J if j$(r)"
+        @test format_string("$(l)i$(sp)for$(sp)(i, j) in I$(r)") == "$(l)i for (i, j) in I$(r)"
+        @test format_string("$(l)i for i in I$(sp)if$(sp)(i)$(r)") == "$(l)i for i in I if (i)$(r)"
+        # Newlines are kept
+        @test format_string("[\n    i\n    for i in I\n    if i\n]") ==
+            "[\n    i\n        for i in I\n        if i\n]"
+    end
+    @test format_string("[i for i in I if(i)]") == "[i for i in I if (i)]"
 end
 
 @testset "whitespace in let" begin
@@ -634,6 +711,141 @@ end
     @test format_string("a >:  T   >:    S") == "a >: T >: S"
 end
 
+@testset "spaces around semicolons" begin
+    for sp in ("", " ", "  ")
+        # Statements separated by `;`
+        @test format_string("a$(sp);$(sp)b") == "a; b"
+        @test format_string("a = 1$(sp);$(sp)b = 2") == "a = 1; b = 2"
+        @test format_string("a$(sp);$(sp)b$(sp);$(sp)c") == "a; b; c"
+        @test format_string("a$(sp);$(sp)@m b") == "a; @m b"
+        @test format_string("begin\n    a$(sp);$(sp)b\nend") == "begin\n    a; b\nend"
+        @test format_string("quote\n    a$(sp);$(sp)b\nend") == "quote\n    a; b\nend"
+        # Trailing `;`
+        @test format_string("a$(sp);") == "a;"
+        @test format_string("a$(sp);\nb") == "a;\nb"
+        # Comments after `;`
+        csp = sp == "" ? " " : sp
+        @test format_string("a$(sp);$(csp)# c\nb") == "a;$(csp)# c\nb"
+        @test format_string("a$(sp);$(sp)b # c") == "a; b # c"
+    end
+    # Leading `;` on a line
+    @test format_string("begin\n    a\n    ;b\nend") == "begin\n    a\n    ; b\nend"
+    # Concatenation syntax
+    for sp in ("", " ", "  "), (l, r) in (("[", "]"), ("T[", "]"))
+        for semi in (";", ";;", ";;;")
+            @test format_string("$(l)a$(sp)$(semi)$(sp)b$(r)") == "$(l)a$(semi) b$(r)"
+            @test format_string("$(l)a$(sp)$(semi)$(sp)$(r)") == "$(l)a$(semi)$(r)"
+        end
+        # Space separated rows (can not be mixed with `;;`)
+        for semi in (";", ";;;")
+            @test format_string("$(l)a b$(sp)$(semi)$(sp)c d$(r)") == "$(l)a b$(semi) c d$(r)"
+            @test format_string("$(l)a b$(sp)$(semi)$(sp)$(r)") == "$(l)a b$(semi)$(r)"
+        end
+        # Multiline
+        @test format_string("$(l)a b$(sp);$(sp)\nc d$(r)") == "$(l)\n    a b;\n    c d\n$(r)"
+        @test format_string("$(l)a b$(sp); # c\nc d$(r)") == "$(l)\n    a b; # c\n    c d\n$(r)"
+        @test format_string("$(l)1$(sp);$(sp)2$(sp);;$(sp)3$(sp);$(sp)4$(r)") == "$(l)1; 2;; 3; 4$(r)"
+        @test format_string("$(l)1 2$(sp);$(sp)3 4$(sp);;;$(sp)5 6$(sp);$(sp)7 8$(r)") ==
+            "$(l)1 2; 3 4;;; 5 6; 7 8$(r)"
+        @test format_string("$(l);$(r)") == "$(l);$(r)"
+        @test format_string("$(l);;$(r)") == "$(l);;$(r)"
+    end
+end
+
+@testset "space before end" begin
+    for sp in (" ", "  ")
+        # Type definitions
+        @test format_string("struct A$(sp)end") == "struct A end"
+        @test format_string("struct A{T} <: B$(sp)end") == "struct A{T} <: B end"
+        @test format_string("mutable struct A$(sp)end") == "mutable struct A end"
+        @test format_string("abstract type A$(sp)end") == "abstract type A end"
+        @test format_string("abstract type A <: B$(sp)end") == "abstract type A <: B end"
+        @test format_string("primitive type A 8$(sp)end") == "primitive type A 8 end"
+        @test format_string("primitive type A <: B 8$(sp)end") == "primitive type A <: B 8 end"
+        @test format_string("@eval primitive type A \$(N)$(sp)end") ==
+            "@eval primitive type A \$(N) end"
+        @test format_string("primitive type A N * 8$(sp)end") == "primitive type A N * 8 end"
+        # Other blocks
+        @test format_string("function f()$(sp)end") == "function f() end"
+        @test format_string("function f$(sp)end") == "function f end"
+        @test format_string("macro m()$(sp)end") == "macro m() end"
+        @test format_string("begin$(sp)end") == "begin end"
+        @test format_string("quote$(sp)end") == "quote end"
+        @test format_string("let x = 1$(sp)end") == "let x = 1 end"
+        @test format_string("for x in y$(sp)end") == "for x in y end"
+        @test format_string("while c$(sp)end") == "while c end"
+        @test format_string("if c$(sp)end") == "if c end"
+        @test format_string("if c else$(sp)end") == "if c else end"
+        @test format_string("module M$(sp)end") == "module M end"
+        @test format_string("try catch$(sp)end") == "try catch end"
+        @test format_string("try catch e$(sp)end") == "try catch e end"
+        @test format_string("try finally$(sp)end") == "try finally end"
+        @test format_string("f() do x$(sp)end") == "f() do x end"
+        @test format_string("x -> begin$(sp)end") == "x -> begin end"
+        @test format_string("@m begin$(sp)end") == "@m begin end"
+        # Comments
+        @test format_string("abstract type A$(sp)# c\nend") == "abstract type A$(sp)# c\nend"
+        @test format_string("struct A end$(sp)# c") == "struct A end$(sp)# c"
+        @test format_string("struct A #= c =#$(sp)end") == "struct A #= c =#$(sp)end"
+    end
+    # Missing space
+    @test format_string("function f()end") == "function f() end"
+    @test format_string("macro m()end") == "macro m() end"
+    @test format_string("primitive type A 8end") == "primitive type A 8 end"
+    # `end` in indexing is not a keyword
+    @test format_string("a[1 +  end]") == "a[1 + end]"
+    @test format_string("a[2:end]") == "a[2:end]"
+end
+
+@testset "primitive type" begin
+    # Space before the number of bits
+    for sp in (" ", "  ")
+        @test format_string("primitive type A$(sp)8 end") == "primitive type A 8 end"
+        @test format_string("primitive type A <: B$(sp)8 end") == "primitive type A <: B 8 end"
+        @test format_string("@eval primitive type A$(sp)\$(N) end") ==
+            "@eval primitive type A \$(N) end"
+        @test format_string("primitive type A$(sp)N * 8 end") == "primitive type A N * 8 end"
+        @test format_string("primitive type A #= c =#$(sp)8 end") ==
+            "primitive type A #= c =#$(sp)8 end"
+    end
+    # Indentation of the number of bits on a separate line
+    for sp in ("", "  ", "        ")
+        @test format_string("primitive type A\n$(sp)8\nend") == "primitive type A\n    8\nend"
+        @test format_string("primitive type A <: B\n$(sp)8\nend") ==
+            "primitive type A <: B\n    8\nend"
+        @test format_string("primitive type A\n$(sp)N * 8\nend") ==
+            "primitive type A\n    N * 8\nend"
+        @test format_string("@eval primitive type A\n$(sp)\$(N)\nend") ==
+            "@eval primitive type A\n    \$(N)\nend"
+        @test format_string("primitive type A # c\n$(sp)8 # c\nend") ==
+            "primitive type A # c\n    8 # c\nend"
+        # Newline before `end` in multiline definitions
+        @test format_string("primitive type A\n$(sp)8$(sp)end") == "primitive type A\n    8\nend"
+        @test format_string("primitive type A\n$(sp)8 end") == "primitive type A\n    8\nend"
+        @test format_string("primitive type A\n$(sp)N * 8 end") ==
+            "primitive type A\n    N * 8\nend"
+        @test format_string("primitive type A\n$(sp)8 #= c =# end") ==
+            "primitive type A\n    8 #= c =#\nend"
+        @test format_string("begin\n$(sp)primitive type A\n$(sp)8\n$(sp)end\nend") ==
+            "begin\n    primitive type A\n        8\n    end\nend"
+    end
+    @test format_string("primitive type A 8\nend") == "primitive type A 8\nend"
+end
+
+@testset "spaces in comprehensions" begin
+    for sp in ("", " ", "  "), (l, r) in (("[", "]"), ("T[", "]"))
+        @test format_string("$(l)$(sp)x for x in X$(sp)$(r)") == "$(l)x for x in X$(r)"
+        @test format_string("$(l)$(sp)x for x in X if x$(sp)$(r)") == "$(l)x for x in X if x$(r)"
+        @test format_string("$(l)$(sp)(a, b) for (a, b) in X$(sp)$(r)") ==
+            "$(l)(a, b) for (a, b) in X$(r)"
+        # Newlines and comments are left alone
+        @test format_string("$(l)$(sp)\n    x for x in X\n$(r)") == "$(l)\n    x for x in X\n$(r)"
+        csp = sp == "" ? " " : sp
+        @test format_string("$(l)$(csp)# c\n    x for x in X\n$(r)") ==
+            "$(l)$(csp)# c\n    x for x in X\n$(r)"
+    end
+end
+
 @testset "spaces around keywords" begin
     for sp in (" ", "  ")
         @test format_string("struct$(sp)A end") == "struct A end"
@@ -641,9 +853,17 @@ end
         @test format_string("abstract$(sp)type$(sp)A end") == "abstract type A end"
         @test format_string("primitive$(sp)type$(sp)A 64 end") == "primitive type A 64 end"
         @test format_string("function$(sp)A() end") == "function A() end"
+        @test format_string("macro$(sp)A() end") == "macro A() end"
+        @test format_string("macro$(sp)A(x)\n    return x\nend") == "macro A(x)\n    return x\nend"
         @test format_string("if$(sp)a\nelseif$(sp)b\nend") == "if a\nelseif b\nend"
         @test format_string("if$(sp)a && b\nelseif$(sp)c || d\nend") == "if a && b\nelseif c || d\nend"
         @test format_string("try\nerror()\ncatch$(sp)e\nend") == "try\n    error()\ncatch e\nend"
+        @test format_string("for$(sp)outer$(sp)i in I\nend") == "for outer i in I\nend"
+        @test format_string("for outer$(sp)i in I, outer$(sp)j in J\nend") ==
+            "for outer i in I, outer j in J\nend"
+        @test format_string("[x for$(sp)outer$(sp)x in X]") == "[x for outer x in X]"
+        @test format_string("(x for outer$(sp)x in X if c)") == "(x for outer x in X if c)"
+        @test format_string("for outer #= c =#$(sp)i in I\nend") == "for outer #= c =#$(sp)i in I\nend"
         @test format_string("A$(sp)where$(sp){T}") == "A where {T}"
         @test format_string("A$(sp)where$(sp){T}$(sp)where$(sp){S}") == "A where {T} where {S}"
         @test format_string("f()$(sp)do$(sp)x\ny\nend") == "f() do x\n    y\nend"
@@ -729,6 +949,168 @@ end
     @test format_string("A where B <: C") == "A where {B <: C}"
     @test format_string("A where B >: C") == "A where {B >: C}"
     @test format_string("A where B where C") == "A where {B} where {C}"
+end
+
+@testset "@ after module path in macro calls" begin
+    # Already normalized
+    @test format_string("@mac") == "@mac"
+    @test format_string("@mac x") == "@mac x"
+    @test format_string("Mod.@mac") == "Mod.@mac"
+    @test format_string("Mod.Sub.@mac x") == "Mod.Sub.@mac x"
+    # Move the `@`
+    @test format_string("@Mod.mac") == "Mod.@mac"
+    @test format_string("@Mod.mac x") == "Mod.@mac x"
+    @test format_string("@Mod.mac(x)") == "Mod.@mac(x)"
+    @test format_string("@Mod.Sub.mac x") == "Mod.Sub.@mac x"
+    @test format_string("@a.b.c.d x") == "a.b.c.@d x"
+    @test format_string("@Mod.mac_str") == "Mod.@mac_str"
+    @test format_string("@Mod.mac\"str\"") == "Mod.@mac\"str\""
+    # Nested inside other expressions and other macro calls
+    @test format_string("f(@Mod.mac x)") == "f(Mod.@mac x)"
+    @test format_string("@Mod.mac @Sub.inner x") == "Mod.@mac Sub.@inner x"
+    @test format_string("x = @Mod.mac(y)") == "x = Mod.@mac(y)"
+    @test format_string("function f()\n    @Mod.mac x\nend") ==
+        "function f()\n    return Mod.@mac x\nend"
+    # Indentation is preserved when the `@` moves
+    @test format_string("@Mod.mac begin\n    x\nend") == "Mod.@mac begin\n    x\nend"
+end
+
+@testset "keyword arguments after semicolon" begin
+    # Single line, comma to semicolon
+    @test format_string("f(a = 1)") == "f(; a = 1)"
+    @test format_string("f(x, a = 1)") == "f(x; a = 1)"
+    @test format_string("f(x, y, a = 1, b = 2)") == "f(x, y; a = 1, b = 2)"
+    @test format_string("f(a = 1, b = 2)") == "f(; a = 1, b = 2)"
+    @test format_string("f(x..., a = 1)") == "f(x...; a = 1)"
+    @test format_string("f(x, a = g(y, b = 2))") == "f(x; a = g(y; b = 2))"
+    @test format_string("f(g(a = 1))") == "f(g(; a = 1))"
+    @test format_string("f.(x, a = 1)") == "f.(x; a = 1)"
+    @test format_string("f(x)(y, a = 1)") == "f(x)(y; a = 1)"
+    @test format_string("f(x, a = 1)[1]") == "f(x; a = 1)[1]"
+    @test format_string("f(x, a = 1)::Int") == "f(x; a = 1)::Int"
+    @test format_string("f(x, a = 1).b") == "f(x; a = 1).b"
+    @test format_string("f(x, a = 1)'") == "f(x; a = 1)'"
+    @test format_string("x = f(y, a = 1)") == "x = f(y; a = 1)"
+    @test format_string("+(x, a = 1)") == "+(x; a = 1)"
+    @test format_string("(+)(x, a = 1)") == "(+)(x; a = 1)"
+    @test format_string("f(x, a = 1) && g(y, b = 2)") == "f(x; a = 1) && g(y; b = 2)"
+    @test format_string("[f(x, a = 1) for i in 1:3]") == "[f(x; a = 1) for i in 1:3]"
+    @test format_string("f(x, a = (1, 2))") == "f(x; a = (1, 2))"
+    @test format_string("f(x, a = b = 1)") == "f(x; a = b = 1)"
+    @test format_string("f(x, a = 1,)") == "f(x; a = 1)"
+    @test format_string("f(a = 1,)") == "f(; a = 1)"
+    # Merge with an existing `;` group (comma-kwargs go first)
+    @test format_string("f(x, a = 1; b = 2)") == "f(x; a = 1, b = 2)"
+    @test format_string("f(x, a = 1;)") == "f(x; a = 1)"
+    @test format_string("f(x, a = 1; )") == "f(x; a = 1)"
+    @test format_string("f(x, a = 1; kw...)") == "f(x; a = 1, kw...)"
+    @test format_string("f(x, a = 1; b)") == "f(x; a = 1, b)"
+    @test format_string("f(a = 1; b = 2)") == "f(; a = 1, b = 2)"
+    @test format_string("f(x, a = 1;b = 2)") == "f(x; a = 1, b = 2)"
+    @test format_string("f(x, a = 1 ;  b = 2)") == "f(x; a = 1, b = 2)"
+    @test format_string("f(x, a = 1, b = 2; c = 3, d...)") == "f(x; a = 1, b = 2, c = 3, d...)"
+    # Inside macros and quotes
+    @test format_string("@test f(x, a = 1)") == "@test f(x; a = 1)"
+    @test format_string("@f(x, a = 1)") == "@f(x, a = 1)"
+    @test format_string("@f x a = 1") == "@f x a = 1"
+    @test format_string("x = @f(a = 1)") == "x = @f(a = 1)"
+    @test format_string(":(f(x, a = 1))") == ":(f(x; a = 1))"
+    @test format_string(":(f(x, \$a = 1))") == ":(f(x; \$a = 1))"
+    # do blocks
+    @test format_string("f(x, a = 1) do y\n    g(y, b = 2)\nend") ==
+        "f(x; a = 1) do y\n    g(y; b = 2)\nend"
+    @test format_string("f(x, a = 1;) do y\n    g(y)\nend") == "f(x; a = 1) do y\n    g(y)\nend"
+    @test format_string("f(x, a = 1; b = 2) do y\n    g(y)\nend") ==
+        "f(x; a = 1, b = 2) do y\n    g(y)\nend"
+    @test format_string("f(\n    x,\n    a = 1,\n) do y\n    g(y)\nend") ==
+        "f(\n    x;\n    a = 1,\n) do y\n    g(y)\nend"
+    # Multiline
+    @test format_string("f(\n    x,\n    a = 1,\n)") == "f(\n    x;\n    a = 1,\n)"
+    @test format_string("f(\n    x,\n    a = 1\n)") == "f(\n    x;\n    a = 1\n)"
+    @test format_string("f(\n    a = 1,\n    b = 2,\n)") == "f(;\n    a = 1,\n    b = 2,\n)"
+    @test format_string("f(\n    x, a = 1,\n    b = 2,\n)") == "f(\n    x; a = 1,\n    b = 2,\n)"
+    @test format_string("f(x,\n    a = 1)") == "f(\n    x;\n    a = 1\n)"
+    @test format_string("f(x, a = 1,\n    b = 2)") == "f(\n    x; a = 1,\n    b = 2\n)"
+    @test format_string("f(\n    x, a = 1;\n    b = 2,\n)") == "f(\n    x; a = 1,\n    b = 2,\n)"
+    @test format_string("f(x, a = 1;\n    b = 2)") == "f(\n    x; a = 1,\n    b = 2\n)"
+    @test format_string("f(x,\n    a = 1;\n    b = 2)") == "f(\n    x;\n    a = 1,\n    b = 2\n)"
+    @test format_string("f(x, a = 1\n    ; b = 2)") == "f(\n    x; a = 1,\n    b = 2\n)"
+    @test format_string("f(\n    a = 1;\n    b = 2,\n)") == "f(;\n    a = 1,\n    b = 2,\n)"
+    @test format_string("f(a = 1;\n    b = 2)") == "f(;\n    a = 1,\n    b = 2\n)"
+    # Comments (never move)
+    @test format_string("f(\n    x, # cx\n    a = 1, # ca\n)") ==
+        "f(\n    x; # cx\n    a = 1, # ca\n)"
+    @test format_string("f(\n    x,\n    # about a\n    a = 1,\n)") ==
+        "f(\n    x;\n    # about a\n    a = 1,\n)"
+    @test format_string("f(\n    # leading\n    a = 1,\n)") == "f(;\n    # leading\n    a = 1,\n)"
+    @test format_string("f(x, a = 1 #= c =#)") == "f(x; a = 1 #= c =#)"
+    @test format_string("f(x, a = 1 #= c =#,)") == "f(x; a = 1 #= c =#)"
+    @test format_string("f(\n    x,\n    a = 1 #= c =#,\n)") == "f(\n    x;\n    a = 1 #= c =#,\n)"
+    @test format_string("f(x, #= c =# a = 1)") == "f(x; #= c =# a = 1)"
+    @test format_string("f(x, a #==# = 1)") == "f(x; a #==# = 1)"
+    @test format_string("f(x, a = 1, #= c =# b = 2)") == "f(x; a = 1, #= c =# b = 2)"
+    @test format_string("f(\n    x, # cx\n    a = 1; # ca\n    b = 2,\n)") ==
+        "f(\n    x; # cx\n    a = 1, # ca\n    b = 2,\n)"
+    @test format_string("f(\n    x,\n    a = 1;\n    # cb\n    b = 2,\n)") ==
+        "f(\n    x;\n    a = 1,\n    # cb\n    b = 2,\n)"
+    @test format_string("f(\n    x,\n    a = 1, # ca\n    ; b = 2,\n)") ==
+        "f(\n    x;\n    a = 1, # ca\n    b = 2,\n)"
+    # Untouched: reordering would be needed
+    @test format_string("f(a = 1, x)") == "f(a = 1, x)"
+    @test format_string("f(x, a = 1, y)") == "f(x, a = 1, y)"
+    @test format_string("f(x, a = 1, kw...)") == "f(x, a = 1, kw...)"
+    @test format_string("f(x, a = 1 #= c =#, y)") == "f(x, a = 1 #= c =#, y)"
+    # Untouched: definitions (long, short, wrapped, callable objects, macros)
+    @test format_string("function f(x, a = 1)\n    return x\nend") ==
+        "function f(x, a = 1)\n    return x\nend"
+    @test format_string("f(x, a = 1) = x") == "f(x, a = 1) = x"
+    @test format_string("Base.f(x, a = 1) = x") == "Base.f(x, a = 1) = x"
+    @test format_string("f(x, a = 1)::Int = x") == "f(x, a = 1)::Int = x"
+    @test format_string("f(x, a = 1) where {T} = x") == "f(x, a = 1) where {T} = x"
+    @test format_string("f(x, a = 1) where T = x") == "f(x, a = 1) where {T} = x"
+    @test format_string("function f(x, a = 1)::Int where {T}\n    return x\nend") ==
+        "function f(x, a = 1)::Int where {T}\n    return x\nend"
+    @test format_string("(obj::T)(x, a = 1) = x") == "(obj::T)(x, a = 1) = x"
+    @test format_string("f(x)(y, a = 1) = 1") == "f(x)(y, a = 1) = 1"
+    @test format_string("macro m(x, a = 1)\n    return x\nend") ==
+        "macro m(x, a = 1)\n    return x\nend"
+    @test format_string("@inline f(x, a = 1) = x") == "@inline f(x, a = 1) = x"
+    @test format_string("struct S\n    S(x, a = 1) = new(x, a)\nend") ==
+        "struct S\n    S(x, a = 1) = new(x, a)\nend"
+    @test format_string("g(f(x, a = 1) = 2)") == "g(f(x, a = 1) = 2)"
+    # ... but calls in the body, or nested in the signature, are still converted
+    @test format_string("function f(x, a = 1)\n    return g(y, b = 2)\nend") ==
+        "function f(x, a = 1)\n    return g(y; b = 2)\nend"
+    @test format_string("@inline function f(x, a = 1)\n    return g(y, b = 2)\nend") ==
+        "@inline function f(x, a = 1)\n    return g(y; b = 2)\nend"
+    @test format_string("f(x, a = 1) = g(y, b = 2)") == "f(x, a = 1) = g(y; b = 2)"
+    @test format_string("function (x, a = 1)\n    return g(y, b = 2)\nend") ==
+        "function (x, a = 1)\n    return g(y; b = 2)\nend"
+    @test format_string("f(x::typeof(g(y, a = 1))) = x") == "f(x::typeof(g(y; a = 1))) = x"
+    # Untouched: not calls
+    @test format_string("(x, a = 1)") == "(x, a = 1)"
+    @test format_string("(a = 1,)") == "(a = 1,)"
+    @test format_string("[x, a = 1]") == "[x, a = 1]"
+    @test format_string("A[x, a = 1]") == "A[x, a = 1]"
+    @test format_string("T{x, a = 1}") == "T{x, a = 1}"
+    # Other assignment-like kids
+    @test format_string("f(x, a .= 1)") == "f(x, a .= 1)"
+    @test format_string("f(a .= 1, b = 2)") == "f(a .= 1; b = 2)"
+    @test format_string("f(x, a += 1)") == "f(x, a += 1)"
+    @test format_string("f(x, var\"a b\" = 1)") == "f(x; var\"a b\" = 1)"
+    # Untouched: lowering errors and odd shapes
+    @test format_string("f(x, a::Int = 1)") == "f(x, a::Int = 1)"
+    @test format_string("f(x, a.b = 1)") == "f(x, a.b = 1)"
+    @test format_string("f(x, a[1] = 1)") == "f(x, a[1] = 1)"
+    @test format_string("f(x; a = 1; b = 2)") == "f(x; a = 1; b = 2)"
+    @test format_string("f(x, a = 1; b = 2; c = 3)") == "f(x, a = 1; b = 2; c = 3)"
+    @test format_string("f(\n    # runic: off\n    x,   a = 1,\n    # runic: on\n)") ==
+        "f(\n    # runic: off\n    x,   a = 1,\n    # runic: on\n)"
+    # Already normalized
+    @test format_string("f(x; a = 1)") == "f(x; a = 1)"
+    @test format_string("f(; a = 1)") == "f(; a = 1)"
+    @test format_string("f(;\n    a = 1,\n)") == "f(;\n    a = 1,\n)"
+    @test format_string("f(x; a = 1, b = 2)") == "f(x; a = 1, b = 2)"
 end
 
 @testset "block/hard indentation" begin
@@ -1215,6 +1597,29 @@ end
     @test format_string("export ^, var\"x\"") == "export ^, var\"x\""
     # Parenthesized identifiers. JuliaSyntax gives a warning but it is still allowed.
     @test format_string("export (a) ,  (^)") == "export (a), (^)"
+end
+
+@testset "spaces in macrocall" begin
+    # https://github.com/fredrikekre/Runic.jl/issues/172
+    @test format_string("@enum    Type        begin\n    ENABLED\n    DISABLED\nend") ==
+        "@enum Type begin\n    ENABLED\n    DISABLED\nend"
+    for sp in ("  ", "\t", "   ")
+        @test format_string("@foo$(sp)a") == "@foo a"
+        @test format_string("@foo$(sp)a$(sp)b$(sp)c") == "@foo a b c"
+        @test format_string("Base.@foo$(sp)a$(sp)b") == "Base.@foo a b"
+        @test format_string("@assert x$(sp)\"message\"") == "@assert x \"message\""
+        @test format_string("@foo$(sp)(a, b)") == "@foo (a, b)"
+        # Whitespace hidden inside the first argument node
+        @test format_string("@test$(sp)a == b") == "@test a == b"
+        @test format_string("x = @test$(sp)a == b") == "x = @test a == b"
+        @test format_string("@foo$(sp)a...") == "@foo a..."
+    end
+    # Inline block comments between arguments
+    @test format_string("@foo a #= b =#  c") == "@foo a #= b =# c"
+    # Already formatted code is not modified
+    for str in ("@foo a b c", "@foo", "@doc \"docs\"\nf", "r\"foo\"", "@foo(a, b)")
+        @test format_string(str) == str
+    end
 end
 
 @testset "parsing new syntax" begin
@@ -1948,6 +2353,14 @@ end
         """
     @test format_lines(str, [4:4]) == str
     @test_throws Runic.MainError format_lines("1+1", [1:2])
+    # Keyword arguments are only moved after `;` when the whole call is in the range
+    str = "f(\n    x,\n    a = 1,\n)\n"
+    @test format_lines(str, 3:3) == str
+    @test format_lines(str, 2:2) == str
+    @test format_lines(str, 1:1) == str
+    @test format_lines(str, 1:4) == "f(\n    x;\n    a = 1,\n)\n"
+    str = "g(\n    f(x, a = 1),\n    f(y, b = 2),\n)\n"
+    @test format_lines(str, 2:2) == "g(\n    f(x; a = 1),\n    f(y, b = 2),\n)\n"
     # A range that starts or ends inside a multiline string or command literal is
     # extended to the whole literal: the range markers must not become part of the
     # literal's content (where they change the indentation stripped from it)
@@ -2237,6 +2650,41 @@ end
     @test fm("```{}\nx=1\n```\n") == "```{}\nx=1\n```\n"
     @test fm("```{julia\nx=1\n```\n") == "```{julia\nx=1\n```\n"
     @test fm("```{julia, echo=FALSE}\nx=1\n```\n") == "```{julia, echo=FALSE}\nx=1\n```\n"
+
+    # Documenter blocks (```@example etc.) are formatted by default and can be opted out
+    # of with the `languages` keyword. Block names and options after the language are
+    # ignored. Trailing semicolons and `# hide` comments are preserved. `@meta` is not a
+    # code block and is left as is.
+    src_doc = "```@example name; continued = true\nx=1\n```\n\n```@repl\ny=2; # hide\n```\n" *
+        "\n```@meta\nCurrentModule=Foo\n```\n\n```julia\nz=3\n```\n"
+    out_doc = "```@example name; continued = true\nx = 1\n```\n\n```@repl\ny = 2; # hide\n```\n" *
+        "\n```@meta\nCurrentModule=Foo\n```\n\n```julia\nz = 3\n```\n"
+    @test fm(src_doc) == out_doc
+    @test fm(out_doc) == out_doc
+    @test fm(src_doc; languages = ["julia"]) == replace(src_doc, "z=3" => "z = 3")
+    @test fm(src_doc; languages = ["julia", "@example", "@repl"]) == out_doc
+    # Custom language list replaces the default: `julia` is no longer formatted
+    @test fm(src_doc; languages = ["@example"]) == replace(src_doc, "x=1" => "x = 1")
+    # The `languages` keyword is also honored for docstrings
+    src_ds_doc = "\"\"\"\n```@example\nx=1\n```\n\"\"\"\nf(x)=x\n"
+    @test format_string(src_ds_doc; docstrings = true) ==
+        "\"\"\"\n```@example\nx = 1\n```\n\"\"\"\nf(x) = x\n"
+    @test format_string(src_ds_doc; docstrings = true, languages = ["julia"]) ==
+        replace(src_ds_doc, "f(x)=x" => "f(x) = x")
+    mktempdir() do dir
+        path = joinpath(dir, "doc.md")
+        write(path, src_doc)
+        Runic.format_file(path; inplace = true)
+        @test read(path, String) == out_doc
+        write(path, src_doc)
+        Runic.format_file(path; inplace = true, languages = ["julia"])
+        @test read(path, String) == replace(src_doc, "z=3" => "z = 3")
+    end
+    # Documenter blocks that do not contain Julia code are never formatted by default
+    for lang in ("@meta", "@docs", "@autodocs", "@contents", "@index", "@raw html")
+        src_nocode = "```$(lang)\nx=1\n```\n"
+        @test fm(src_nocode) == src_nocode
+    end
 
     # Idempotency: an already-formatted file is unchanged
     @test fm(out) == out

@@ -122,7 +122,7 @@ function maintests(f::R, real_home::String) where {R}
                 ["--output=$f_out"], ["-o", f_out],
                 ["--output=$f_out", "-"], ["-o", f_out, "-"],
             ]
-            rm(f_out, force = true)
+            rm(f_out; force = true)
             rc, fd1, fd2 = runic(argv, bad)
             @test rc == 0
             @test isempty(fd1)
@@ -150,7 +150,7 @@ function maintests(f::R, real_home::String) where {R}
         write(f_in, bad)
         f_out = "out.jl"
         for argv in [["--output=$f_out", f_in], ["-o", f_out, f_in]]
-            rm(f_out, force = true)
+            rm(f_out; force = true)
             rc, fd1, fd2 = runic(argv)
             @test rc == 0
             @test isempty(fd1) && isempty(fd2)
@@ -159,7 +159,7 @@ function maintests(f::R, real_home::String) where {R}
         end
         # --verbose
         let argv = ["--verbose", "--output=$f_out", f_in]
-            rm(f_out, force = true)
+            rm(f_out; force = true)
             rc, fd1, fd2 = runic(argv)
             @test rc == 0
             @test isempty(fd1)
@@ -841,6 +841,41 @@ function maintests(f::R, real_home::String) where {R}
         @test rc != 0
     end
 
+    # --languages: Documenter blocks are formatted by default and can be opted out of
+    let src = "```@example\nx=1\n```\n\n```julia\ny=2\n```\n"
+        rc, fd1, fd2 = runic(["--stdin-filename=foo.md"], src)
+        @test rc == 0
+        @test fd1 == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```\n"
+        rc, fd1, fd2 = runic(["--stdin-filename=foo.md", "--languages=julia"], src)
+        @test rc == 0
+        @test fd1 == "```@example\nx=1\n```\n\n```julia\ny = 2\n```\n"
+        rc, fd1, fd2 = runic(["--stdin-filename=foo.md", "--languages=julia,@example"], src)
+        @test rc == 0
+        @test fd1 == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```\n"
+        # Spaces around the separators are ignored
+        rc, fd1, fd2 = runic(["--stdin-filename=foo.md", "--languages= @example , julia "], src)
+        @test rc == 0
+        @test fd1 == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```\n"
+        # The list replaces the default
+        rc, fd1, fd2 = runic(["--stdin-filename=foo.md", "--languages=@example"], src)
+        @test rc == 0
+        @test fd1 == "```@example\nx = 1\n```\n\n```julia\ny=2\n```\n"
+    end
+    # --languages also applies to docstrings
+    let src = "\"\"\"\n```@example\nx=1\n```\n\"\"\"\nf(x) = x\n"
+        rc, fd1, fd2 = runic(["--docstrings"], src)
+        @test rc == 0
+        @test fd1 == "\"\"\"\n```@example\nx = 1\n```\n\"\"\"\nf(x) = x\n"
+        rc, fd1, fd2 = runic(["--docstrings", "--languages=julia"], src)
+        @test rc == 0
+        @test fd1 == src
+    end
+    # --languages with invalid (empty) input
+    let (rc, fd1, fd2) = runic(["--languages=", "--stdin-filename=foo.md"], "")
+        @test rc != 0
+        @test occursin("`--languages` requires at least one language", fd2)
+    end
+
     # Safety checks for directory recursion (see #200)
 
     # Temporarily point `homedir()` to `home` and, if given, replace `DEPOT_PATH` with
@@ -907,7 +942,7 @@ function maintests(f::R, real_home::String) where {R}
         @test read(rootgitfile, String) == "this is not a Julia file"
         @test read(subgitfile, String) == "this is not a Julia file"
         # A `.git` file (submodule, linked worktree) also marks a nested repository
-        rm(joinpath("sub", ".git"), recursive = true)
+        rm(joinpath("sub", ".git"); recursive = true)
         write(joinpath("sub", ".git"), "gitdir: ../.git/modules/sub\n")
         write(f_sub, bad)
         rc, fd1, fd2 = runic(["-i", "."])

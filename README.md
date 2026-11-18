@@ -118,12 +118,23 @@ Format Julia code blocks inside Markdown files. Dispatch is by file extension �
 file whose name ends in `.md` or `.qmd` (Quarto) is routed through the Markdown
 formatter, which only rewrites the embedded Julia code blocks and leaves the prose
 alone. In addition to the fences listed above, Quarto executable code cells
-(```` ```{julia} ````) are recognized as Julia code blocks:
+(```` ```{julia} ````) and the [Documenter](https://github.com/JuliaDocs/Documenter.jl)
+blocks with code (```` ```@example ````, ```` ```@repl ````,
+```` ```@setup ````, and ```` ```@eval ````; block names and options such as
+```` ```@example name; continued = true ```` are ignored) are recognized as Julia code
+blocks:
 ```sh
 runic --inplace README.md                # explicit path — extension handles it
 runic --extensions=jl,md,qmd --inplace . # directory walk picks up all three kinds
 echo '```julia' > foo.md && echo '1+1' >> foo.md && echo '```' >> foo.md
 cat foo.md | runic --stdin-filename=foo.md   # stdin dispatch via virtual filename
+```
+
+The set of fence languages that are treated as Julia code can be customized with
+`--languages`. For example, to skip the Documenter blocks and only format the plain
+```` ```julia ```` fences:
+```sh
+runic --languages=julia --inplace docs/src/
 ```
 
 Output of `runic --help` for a complete list of options:
@@ -173,6 +184,13 @@ OPTIONS
 
        -i, --inplace
            Format files in place.
+
+       --languages=<lang>[,<lang>...]
+           Comma-separated list of fenced code block languages that are treated
+           as Julia code when formatting Markdown files and docstrings. Defaults
+           to `julia,julia-repl,jldoctest,@example,@repl,@setup,@eval`, which
+           includes the Documenter blocks with code. Use e.g.
+           `--languages=julia,julia-repl,jldoctest` to skip Documenter blocks.
 
        --lines=<start line>:<end line>
            Limit formatting to the line range <start line> to <end line>. Multiple
@@ -418,9 +436,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # - uses: julia-actions/setup-julia@v2
-      #   with:
-      #     version: '1'
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
       # - uses: julia-actions/cache@v2
       - uses: fredrikekre/runic-action@v1
         with:
@@ -556,11 +574,14 @@ This is a list of things that Runic currently is doing:
  - [Multiline listlike expressions](#multiline-listlike-expressions)
  - [Spacing in listlike expressions](#spacing-in-listlike-expressions)
  - [Trailing semicolons](#trailing-semicolons)
+ - [Spaces around semicolons](#spaces-around-semicolons)
  - [Literal floating point numbers](#literal-floating-point-numbers)
  - [Literal hex and oct numbers](#literal-hex-and-oct-numbers)
  - [Parentheses around operator calls in colon](#parentheses-around-operator-calls-in-colon)
  - [`in` instead of `∈` and `=`](#in-instead-of--and-)
  - [Braces around right hand side of `where`](#braces-around-right-hand-side-of-where)
+ - [`@` after module path in macro calls](#-after-module-path-in-macro-calls)
+ - [Keyword arguments after `;`](#keyword-arguments-after-)
  - [Whitespace miscellaneous](#whitespace-miscellaneous)
 
 ### Toggle formatting
@@ -675,6 +696,14 @@ one until the closing `end`. Examples:
 +    while rand() < 0.5
 +        # loop
 +    end
+ end
+```
+
+The number of bits in a multiline `primitive type` definition is also indented one level:
+```diff
+ primitive type Qux
+-8
++    8
  end
 ```
 
@@ -794,8 +823,9 @@ Examples:
 
 ### Spaces around operators, assignment, etc
 
-Runic formats spaces around infix operators, assignments, comparison chains, and type
-comparisons (binary `<:` and `>:`), and some other operator-like things. If the space is
+Runic formats spaces around infix operators, assignments, comparison chains, type
+comparisons (binary `<:` and `>:`), short-circuiting operators (`&&` and `||`), and some
+other operator-like things. If the space is
 missing it will be inserted, if there are multiple spaces it will be reduced to one.
 Examples:
 ```diff
@@ -816,6 +846,9 @@ Examples:
 -1  <  2  >  3
 +1 < 2 > 3
 +1 < 2 > 3
+
+-a&&b||c
++a && b || c
 
 -T<:Integer
 -T  >:  Integer
@@ -838,8 +871,9 @@ arguments in function definitions and calls. Examples:
 +foo(a = 1)
 ```
 
-Exceptions to the rule above are `:`, `^`, `::`, and unary `<:` and `>:`. These are
-formatted *without* spaces around them. Examples:
+Exceptions to the rule above are `:`, `^`, `::`, unary `<:` and `>:`, splat `...`, and
+`.` in field access and import paths. These are formatted *without* spaces around them (for
+`.` newlines are also removed, unless there is a comment after it). Examples:
 ```diff
 -a : b
 +a:b
@@ -854,6 +888,26 @@ formatted *without* spaces around them. Examples:
 ->:  Integer
 +<:Integer
 +>:Integer
+
+-f(x ...)
++f(x...)
+
+-a. b
+-import A.
+-    B
++a.b
++import A.B
+```
+
+Multiple spaces after other prefix operators (e.g. unary `-` and `!`) are collapsed to a
+single space. The space is not removed completely since that can change the meaning of the
+code (e.g. `- 1` is a call while `-1` is a literal). Examples:
+```diff
+-!  x
++! x
+
+--   1
++- 1
 ```
 
 #### Potential changes
@@ -873,6 +927,21 @@ Consistently use single space around keywords. Examples:
 
 -function  foo(x::T)  where  {T}
 +function foo(x::T) where {T}
+
+-for  outer  i in I
++for outer i in I
+
+-struct Baz  end
++struct Baz end
+
+-function f()  end
++function f() end
+
+-primitive type Qux  8  end
++primitive type Qux 8 end
+
+-[x  for  x in X  if  y]
++[x for x in X if y]
 ```
 
 ### Multiline listlike expressions
@@ -935,6 +1004,20 @@ function/macro calls/definitions. Leading/trailing spaces are removed. Examples:
 
 -( a, b )
 +(a, b)
+
+-[ x for x in X ]
++[x for x in X]
+```
+
+Macro calls without parentheses use a single space between the macro name and the
+arguments, and between the arguments. Examples:
+
+```diff
+-@enum  Fruit   Apple  Banana
++@enum Fruit Apple Banana
+
+-@test  a == b
++@test a == b
 ```
 
 #### Potential changes
@@ -959,6 +1042,28 @@ Trailing semicolons are removed in the body of blocklike expressions. Examples
 Trailing semicolons at top level and module level are kept since they are sometimes used
 there for output suppression (e.g. Documenter examples or scripts that are
 copy-pasted/included in the REPL).
+
+### Spaces around semicolons
+
+Semicolons separating statements are formatted without space before and with a single space
+after. Examples:
+```diff
+-a = 1;b = 2
+-a = 1  ;  b = 2
++a = 1; b = 2
++a = 1; b = 2
+```
+
+The same rule applies to the semicolons in concatenation syntax for arrays. Examples:
+```diff
+-[1 2;3 4]
+-[1 2 ; 3 4]
++[1 2; 3 4]
++[1 2; 3 4]
+
+-[a ;; b]
++[a;; b]
+```
 
 ### Literal floating point numbers
 
@@ -1043,6 +1148,52 @@ Braces are consistently used around the right hand side of `where` expressions. 
 -T where T <: S where S <: Any
 +T where {T}
 +T where {T <: S} where {S <: Any}
+```
+
+### `@` after module path in macro calls
+
+Macro calls with a module path are written with the `@` placed after the module path, i.e.
+directly in front of the macro name. Examples:
+```diff
+-@Mod.mac x
++Mod.@mac x
+
+-@Mod.Sub.mac(x)
++Mod.Sub.@mac(x)
+```
+
+Both forms are valid Julia and parse to the same AST but the `@`-first form is an
+"unnecessary variation in syntax" according to the [JuliaSyntax design
+notes](https://julialang.github.io/JuliaSyntax.jl/dev/design/#Other-oddities).
+See [#223](https://github.com/fredrikekre/Runic.jl/issues/223) for more details.
+
+### Keyword arguments after `;`
+
+Keyword arguments in function calls are separated from the positional arguments with a `;`
+instead of a `,`. Keyword arguments written with a `,` are moved after a `;` (or merged into
+the existing `;` group) when they come after all positional arguments. Arguments are never
+reordered so calls where a positional argument follows a keyword argument, e.g.
+`f(b = 2, a)`, are left as is. This applies to function calls only, and not to e.g.
+function definitions, macro calls, tuples or indexing expressions where `a = 1` is not a
+keyword argument. Examples:
+
+```diff
+-f(a = 1)
+-f(x, a = 1)
+-f(x, a = 1; b = 2)
++f(; a = 1)
++f(x; a = 1)
++f(x; a = 1, b = 2)
+
+ f(
+-    x,
++    x;
+     a = 1,
+ )
+
+ f(b = 2, a)         # positional argument after keyword argument: unchanged
+ f(x, a = 1) = x     # function definition: unchanged
+ @f(x, a = 1)        # macro call: unchanged
 ```
 
 ### Whitespace miscellaneous

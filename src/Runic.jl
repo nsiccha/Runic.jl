@@ -138,6 +138,7 @@ mutable struct Context
     diff::Bool
     filemode::Bool
     docstrings::Bool
+    languages::Vector{String}
     filename::String
     line_ranges::Vector{UnitRange{Int}}
     range_formatting_begin::String
@@ -310,7 +311,7 @@ function add_line_range_markers(str, line_ranges, begin_marker, end_marker)
         return str
     end
     extend_line_ranges_over_multiline_literals!(str, line_ranges)
-    sort!(line_ranges, rev = true)
+    sort!(line_ranges; rev = true)
     for r in line_ranges
         a, b = first(r), last(r)
         # Some tooling considers a trailing \n to start a new line (as opposed to just
@@ -404,7 +405,7 @@ end
 function Context(
         src_str::String; assert::Bool = true, debug::Bool = false, verbose::Bool = debug,
         diff::Bool = false, check::Bool = false, quiet::Bool = false, filemode::Bool = true,
-        docstrings::Bool = false,
+        docstrings::Bool = false, languages::Vector{String} = DEFAULT_MARKDOWN_LANGUAGES,
         line_ranges::Vector{UnitRange{Int}} = UnitRange{Int}[], filename::String = "-",
     )
     src_str = normalize_line_endings(src_str)
@@ -453,7 +454,7 @@ function Context(
     format_on = true
     return Context(
         src_str, src_tree, src_io, fmt_io, fmt_tree, quiet, verbose, assert, debug, check,
-        diff, filemode, docstrings, filename, line_ranges, range_formatting_begin,
+        diff, filemode, docstrings, languages, filename, line_ranges, range_formatting_begin,
         range_formatting_end, indent_level, call_depth, format_on, prev_sibling, next_sibling,
         lineage_kinds, lineage_macros
     )
@@ -768,24 +769,33 @@ function format_node!(ctx::Context, node::Node)::Union{Node, Nothing, NullNode}
     @return_something no_leading_and_single_trailing_newline(ctx, node)
     @return_something max_three_consecutive_newlines(ctx, node)
     @return_something insert_delete_mark_newlines(ctx, node)
+    @return_something tag_function_signature(ctx, node)
     @return_something remove_trailing_semicolon(ctx, node)
     @return_something trim_trailing_whitespace(ctx, node)
     @return_something format_hex_literals(ctx, node)
     @return_something format_float_literals(ctx, node)
     @return_something spaces_around_operators(ctx, node)
+    @return_something spaces_after_prefix_operator(ctx, node)
     @return_something spaces_around_assignments(ctx, node)
     @return_something spaces_around_anonymous_function(ctx, node)
     @return_something spaces_around_ternary(ctx, node)
     @return_something spaces_around_keywords(ctx, node)
+    @return_something space_before_end(ctx, node)
+    @return_something space_before_primitive_bits(ctx, node)
     @return_something spaces_in_import_using(ctx, node)
     @return_something spaces_in_export_public(ctx, node)
+    @return_something spaces_in_macrocall(ctx, node)
     @return_something spaces_in_let(ctx, node)
+    @return_something spaces_around_semicolons(ctx, node)
     @return_something spaces_around_comments(ctx, node)
     @return_something no_spaces_around_colon_etc(ctx, node)
+    @return_something no_spaces_after_dot(ctx, node)
     @return_something parens_around_op_calls_in_colon(ctx, node)
     @return_something for_loop_use_in(ctx, node)
     @return_something explicit_return(ctx, node)
     @return_something braces_around_where_rhs(ctx, node)
+    @return_something at_after_macro_module_path(ctx, node)
+    @return_something kwargs_after_semicolon(ctx, node)
     @return_something indent_multiline_strings(ctx, node)
     @return_something format_docstring(ctx, node)
     @return_something four_space_indent(ctx, node)
@@ -862,8 +872,14 @@ end
 
 Format string `str` and return the formatted string.
 """
-function format_string(str::AbstractString; filemode::Bool = false, docstrings::Bool = false)
-    ctx = Context(String(str); filemode = filemode, docstrings = docstrings, filename = "string")
+function format_string(
+        str::AbstractString; filemode::Bool = false, docstrings::Bool = false,
+        languages::Vector{String} = DEFAULT_MARKDOWN_LANGUAGES,
+    )
+    ctx = Context(
+        String(str); filemode = filemode, docstrings = docstrings, languages = languages,
+        filename = "string",
+    )
     format_tree!(ctx)
     return String(take!(ctx.fmt_io))
 end
@@ -880,7 +896,11 @@ Format file `inputfile` and write the formatted text to `outputfile`.
 Setting the keyword argument `inplace = true` is required if `inputfile` and `outputfile`
 are the same file.
 """
-function format_file(inputfile::AbstractString, outputfile::AbstractString = inputfile; inplace::Bool = false, docstrings::Bool = false)
+function format_file(
+        inputfile::AbstractString, outputfile::AbstractString = inputfile;
+        inplace::Bool = false, docstrings::Bool = false,
+        languages::Vector{String} = DEFAULT_MARKDOWN_LANGUAGES,
+    )
     # Argument handling
     inputfile = normpath(abspath(String(inputfile)))
     outputfile = normpath(abspath(String(outputfile)))
@@ -891,10 +911,10 @@ function format_file(inputfile::AbstractString, outputfile::AbstractString = inp
     # Format it!
     # Dispatch on extension: `.md` and `.qmd` go through the Markdown formatter.
     if is_markdown_file(inputfile)
-        format_markdown_file(str, outputfile; inplace = inplace)
+        format_markdown_file(str, outputfile; inplace = inplace, languages = languages)
         return
     end
-    ctx = Context(str; filename = inputfile, docstrings = docstrings)
+    ctx = Context(str; filename = inputfile, docstrings = docstrings, languages = languages)
     format_tree!(ctx)
     # Write the output but skip if it text didn't change
     formatted = String(take!(ctx.fmt_io))
@@ -909,8 +929,11 @@ end
 # an output path — argument handling (normalization, samefile check) lives in
 # `format_file`. Not part of the public API; call `format_file` instead, which
 # dispatches on extension.
-function format_markdown_file(str::AbstractString, outputfile::AbstractString; inplace::Bool = false)
-    formatted = format_markdown(String(str))
+function format_markdown_file(
+        str::AbstractString, outputfile::AbstractString; inplace::Bool = false,
+        languages::Vector{String} = DEFAULT_MARKDOWN_LANGUAGES,
+    )
+    formatted = format_markdown(String(str); languages = languages)
     if formatted != str || !inplace
         write(outputfile, formatted)
     end

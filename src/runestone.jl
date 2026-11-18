@@ -332,6 +332,11 @@ function trailing_comma_policy(
         # Exception: `((a, b),) -> body` — when the single item is itself a tuple the outer
         # trailing comma must be kept, otherwise `((a, b))` is parsed as `(a, b)` (2 args).
         require_trailing_comma = false
+    elseif kind(node) === K"iteration"
+        # Trailing commas are not allowed in iteration specifications
+        # (`for i in I, end` is a parse error)
+        require_trailing_comma = false
+        allow_trailing_comma = false
     elseif n_items > 0 && kind(kids[last_item_idx::Int]) === K"generator"
         # https://github.com/fredrikekre/Runic.jl/issues/151
         require_trailing_comma = false
@@ -423,7 +428,8 @@ end
 
 function spaces_in_listlike(ctx::Context, node::Node)
     if !(
-            kind(node) in KSet"tuple parameters curly braces bracescat vect ref parens" ||
+            kind(node) in KSet"tuple parameters curly braces bracescat vect ref parens iteration" ||
+                kind(node) in KSet"comprehension typed_comprehension" ||
                 (kind(node) in KSet"call dotcall" && !is_any_op_call(node)) ||
                 (kind(node) === K"macrocall" && JuliaSyntax.has_flags(node, JuliaSyntax.PARENS_FLAG)) ||
                 is_paren_block(node)
@@ -470,10 +476,16 @@ function spaces_in_listlike(ctx::Context, node::Node)
         opening_leaf_idx = findfirst(x -> kind(x) === K"{", kids)::Int
         closing_leaf_idx = findnext(x -> kind(x) === K"}", kids, opening_leaf_idx + 1)::Int
         closing_leaf_idx == opening_leaf_idx + 1 && return nothing # empty
-    elseif kind(node) in KSet"vect ref"
+    elseif kind(node) in KSet"vect ref comprehension typed_comprehension"
         opening_leaf_idx = findfirst(x -> kind(x) === K"[", kids)::Int
         closing_leaf_idx = findnext(x -> kind(x) === K"]", kids, opening_leaf_idx + 1)::Int
         closing_leaf_idx == opening_leaf_idx + 1 && return nothing # empty
+    elseif kind(node) === K"iteration"
+        # Iteration specifications in for loops and generators (`for i in I, j in J`) have
+        # no opening/closing delimiters so the first and last non-whitespace kids are used
+        # as the boundaries instead (same as for implicit tuples above).
+        opening_leaf_idx = findfirst(!JuliaSyntax.is_whitespace, kids)::Int - 1
+        closing_leaf_idx = findlast(!JuliaSyntax.is_whitespace, kids)::Int + 1
     else
         @assert kind(node) === K"parameters"
         opening_leaf_idx = findfirst(x -> kind(x) === K";", kids)::Int
@@ -716,17 +728,18 @@ function spaces_in_listlike(ctx::Context, node::Node)
 end
 
 # This pass handles spaces around infix operator calls, comparison chains, and
-# <: and >: operators.
+# <:, >:, &&, ||, and --> operators.
 function spaces_around_operators(ctx::Context, node::Node)
     if !(
             (is_infix_op_call(node) && !(infix_op_call_op(ctx, node) in KSet": ^")) ||
                 (kind(node) in KSet"<: >:" && meta_nargs(node) == 3) ||
                 (kind(node) === K"comparison" && !JuliaSyntax.is_trivia(node)) ||
-                kind(node) === K"in" && !is_leaf(node)
+                kind(node) === K"in" && !is_leaf(node) ||
+                (kind(node) in KSet"&& || -->" && !is_leaf(node))
         )
         return nothing
     end
-    @assert kind(node) in KSet"call dotcall comparison <: >: in"
+    @assert kind(node) in KSet"call dotcall comparison <: >: in && || -->"
     n_leaves_per_x = kind(node) === K"dotcall" ? 2 : 1
     return spaces_around_x(ctx, node, n_leaves_per_x)
 end
@@ -762,6 +775,25 @@ function spaces_around_ternary(ctx::Context, node::Node)
     return spaces_around_x(ctx, node)
 end
 
+# Collapse multiple spaces after prefix operators to a single space, e.g. `-  x` is
+# formatted as `- x`. Note that the space is not removed completely since that can change
+# the meaning of the code (e.g. `- 1` is a call but `-1` is a literal).
+function spaces_after_prefix_operator(ctx::Context, node::Node)
+    if !(kind(node) in KSet"call dotcall" && JuliaSyntax.is_prefix_op_call(node))
+        return nothing
+    end
+    kids = verified_kids(node)
+    b = NodeBuilder(ctx, node)
+    for kid in kids
+        if kind(kid) === K"Whitespace" && span(kid) > 1
+            emit!(b, ws_node(1), " ", span(kid))
+        else
+            accept!(b, kid)
+        end
+    end
+    return finish!(b, node)
+end
+
 # Opposite of `spaces_around_x`: remove spaces around `x`
 function no_spaces_around_x(ctx::Context, node::Node)
     @assert !is_leaf(node)
@@ -781,6 +813,99 @@ function no_spaces_around_x(ctx::Context, node::Node)
         else
             @assert !JuliaSyntax.is_whitespace(kid) # Filtered out above
             accept!(b, kid)
+        end
+    end
+    return finish!(b, node)
+end
+
+# Emit `kid` with its leading whitespace normalized to `n` spaces (`n` is 0 or 1). The
+# leading whitespace is either `kid` itself or, in JuliaSyntax v1, often the first leaf of
+# `kid`. If there is no leading whitespace and `n > 0` the spaces are inserted. Newlines and
+# comments are left alone.
+function emit_with_leading_ws!(b::NodeBuilder, kid::Node, n::Int)
+    @assert n in (0, 1)
+    spaces = n == 0 ? "" : " " # Note: `repeat` is not supported by juliac
+    fl = is_leaf(kid) ? kid : first_leaf(kid)
+    if kind(fl) in KSet"NewlineWs Comment"
+        accept!(b, kid)
+    elseif kind(fl) === K"Whitespace"
+        if span(fl) == n
+            accept!(b, kid)
+        elseif is_leaf(kid)
+            if n == 0
+                skip_kid!(b, kid)
+            else
+                emit!(b, ws_node(n), spaces, span(kid))
+            end
+        else
+            replace_bytes!(b.ctx, spaces, span(fl))
+            emit!(b, replace_first_leaf(kid, n == 0 ? nullnode : ws_node(n)))
+        end
+    else
+        if n > 0
+            emit!(b, ws_node(n), spaces, 0)
+        end
+        accept!(b, kid)
+    end
+    return
+end
+
+# No space before and a single space after `;` separating statements, e.g. `a  ;b` is
+# formatted as `a; b`, and after `;`, `;;`, etc. in concatenation syntax, e.g. `[a  ;;b]` is
+# formatted as `[a;; b]`. Newlines and comments after `;` are left alone.
+function spaces_around_semicolons(ctx::Context, node::Node)
+    if !(
+            (kind(node) in KSet"toplevel block" && !is_paren_block(node)) ||
+                kind(node) in KSet"vcat typed_vcat ncat typed_ncat row nrow"
+        ) || is_leaf(node)
+        return nothing
+    end
+    kids = verified_kids(node)
+    is_concat = kind(node) in KSet"vcat typed_vcat ncat typed_ncat row nrow"
+    # In concatenation syntax a `;` can also be the last leaf of a row
+    ends_with_semicolon(x) = kind(x) === K";" ||
+        (is_concat && !is_leaf(x) && kind(last_leaf(x)) === K";")
+    any(ends_with_semicolon, kids) || return nothing
+    b = NodeBuilder(ctx, node)
+    # Kind of the first non-whitespace token after kids[i], looking at the next sibling of
+    # the node if there are no more kids
+    function kind_after(i)
+        j = findnext(x -> kind(x) !== K"Whitespace", kids, i + 1)
+        if j === nothing
+            return next_sibling_kind(ctx)
+        else
+            return kind(is_leaf(kids[j]) ? kids[j] : first_leaf(kids[j]))
+        end
+    end
+    no_space_kinds = KSet"NewlineWs Comment ] ) end"
+    for (i, kid) in pairs(kids)
+        if kind(kid) === K"Whitespace" && i < length(kids) && kind(kids[i + 1]) === K";" &&
+                i > 1 && !(kind(kids[i - 1]) in KSet"NewlineWs [ (")
+            # Whitespace before `;`
+            skip_kid!(b, kid)
+        elseif i > 1 && ends_with_semicolon(kids[i - 1]) && kind(kid) !== K";"
+            # First kid after a run of `;`
+            nk = kind_after(i - 1)
+            if nk === nothing || nk in no_space_kinds
+                if kind(kid) === K"Whitespace" && nk !== K"Comment"
+                    skip_kid!(b, kid)
+                else
+                    accept!(b, kid)
+                end
+            else
+                emit_with_leading_ws!(b, kid, 1)
+            end
+        else
+            accept!(b, kid)
+        end
+    end
+    if kind(node) in KSet"row nrow" && kind(kids[end]) === K";"
+        # Trailing `;` of a row (e.g. the first row in `[a b;c d]`): insert a space if
+        # followed directly by the next row. Whitespace after the row is handled by the
+        # parent node.
+        nk = next_sibling_kind(ctx)
+        if !(nk === nothing || nk in no_space_kinds || nk === K"Whitespace")
+            emit!(b, ws_node(1), " ", 0)
         end
     end
     return finish!(b, node)
@@ -853,6 +978,38 @@ function spaces_in_export_public(ctx::Context, node::Node)
             end
         end
         i += 1
+    end
+    return finish!(b, node)
+end
+
+# Single space between the macro name and the arguments, and between the arguments, in
+# unparenthesized macro calls, e.g. `@enum  Foo   Bar  Baz` -> `@enum Foo Bar Baz`
+# (parenthesized macro calls are handled by `spaces_in_listlike`). Note that the whitespace
+# before an argument sometimes end up inside the argument node (e.g. inside the `call` node
+# in `@test  a == b`) so this pass also looks at the first leaf of the arguments.
+function spaces_in_macrocall(ctx::Context, node::Node)
+    if !(
+            kind(node) === K"macrocall" && !is_leaf(node) &&
+                !JuliaSyntax.has_flags(node, JuliaSyntax.PARENS_FLAG) && !is_string_macro(node)
+        )
+        return nothing
+    end
+    kids = verified_kids(node)
+    ws = ws_node(1)
+    b = NodeBuilder(ctx, node)
+    for (i, kid) in pairs(kids)
+        if kind(kid) === K"Whitespace" && span(kid) > 1
+            # Replace with a single space
+            emit!(b, ws, " ", span(kid))
+        elseif i > 1 && !is_leaf(kid) &&
+                (fl = first_leaf(kid); fl !== nothing && kind(fl) === K"Whitespace" && span(fl) > 1)
+            # Whitespace hidden as the first leaf of the argument
+            kid′ = replace_first_leaf(kid, ws)
+            @assert span(kid′) == span(kid) - span(fl) + 1
+            emit!(b, kid′, " ", span(fl))
+        else
+            accept!(b, kid)
+        end
     end
     return finish!(b, node)
 end
@@ -1110,12 +1267,33 @@ function no_spaces_around_colon_etc(ctx::Context, node::Node)
     if !(
             (is_infix_op_call(node) && infix_op_call_op(ctx, node) in KSet": ^") ||
                 (kind(node) === K"::" && !is_leaf(node)) ||
-                (kind(node) in KSet"<: >:" && meta_nargs(node) == 2)
+                (kind(node) in KSet"<: >:" && meta_nargs(node) == 2) ||
+                (kind(node) === K"..." && !is_leaf(node))
         )
         return nothing
     end
-    @assert kind(node) in KSet"call :: <: >:"
+    @assert kind(node) in KSet"call :: <: >: ..."
     return no_spaces_around_x(ctx, node)
+end
+
+# No whitespace or newlines after `.` in field access and import paths, e.g. `a. b` and
+# `import A.\nB` are formatted as `a.b` and `import A.B`. If there is a comment after the `.`
+# everything is left as is.
+function no_spaces_after_dot(ctx::Context, node::Node)
+    if !(kind(node) in KSet". importpath" && !is_leaf(node))
+        return nothing
+    end
+    kids = verified_kids(node)
+    any(x -> kind(x) === K"Comment", kids) && return nothing
+    b = NodeBuilder(ctx, node)
+    for (i, kid) in pairs(kids)
+        if kind(kid) in KSet"Whitespace NewlineWs" && i > 1 && kind(kids[i - 1]) === K"."
+            skip_kid!(b, kid)
+        else
+            accept!(b, kid)
+        end
+    end
+    return finish!(b, node)
 end
 
 function space_before_do(ctx::Context, node::Node)
@@ -1198,22 +1376,173 @@ function space_after_for(ctx::Context, node::Node)
     return make_node(node, kids′)
 end
 
+# Single space before the `end` keyword when it is on the same line as the code before it,
+# e.g. `struct A  end`, `begin  end` and `function f()end` are formatted as `struct A end`,
+# `begin end` and `function f() end`. Whitespace after a comment, and `end` directly after
+# `;` (see `spaces_around_semicolons`), are left alone.
+function space_before_end(ctx::Context, node::Node)
+    is_leaf(node) && return nothing
+    kids = verified_kids(node)
+    if !(length(kids) >= 2 && kind(kids[end]) === K"end" && is_leaf(kids[end]))
+        return nothing
+    end
+    # The whitespace before `end` is either a kid of this node (e.g. `abstract type A  end`
+    # and `begin  end`) or the last leaf of the kid before `end` (e.g. the empty body block
+    # in `struct A  end` or the `catch` block in `try catch  end`).
+    leaves = Node[]
+    for i in reverse(1:(length(kids) - 1))
+        last_leaves!(leaves, kids[i], 2)
+        length(leaves) == 2 && break
+    end
+    length(leaves) == 2 || return nothing
+    if kind(leaves[1]) === K"Whitespace"
+        ws, before = leaves[1], leaves[2]
+        span(ws) == 1 && return nothing
+    else
+        ws, before = nothing, leaves[1]
+    end
+    kind(before) in KSet"Comment NewlineWs ;" && return nothing
+    prev = kids[end - 1]
+    ws === nothing || last_leaf(prev) === ws || return nothing
+    b = NodeBuilder(ctx, node)
+    for i in 1:(length(kids) - 2)
+        accept!(b, kids[i])
+    end
+    if ws === nothing && kind(prev) === K"block" && last_leaf(prev) === nothing
+        # Empty body block without whitespace, e.g. `function f()end`: insert the space in
+        # the block to match the shape of `function f() end`
+        emit!(b, make_node(prev, [ws_node(1)]), " ", 0)
+    elseif ws === nothing
+        # No whitespace before `end`, e.g. `primitive type A 8end`
+        accept!(b, prev)
+        emit!(b, ws_node(1), " ", 0)
+    elseif is_leaf(prev)
+        emit!(b, ws_node(1), " ", span(prev))
+    else
+        bytes = read_bytes(ctx, prev)
+        resize!(bytes, span(prev) - span(ws))
+        push!(bytes, UInt8(' '))
+        emit!(b, replace_last_leaf(prev, ws_node(1)), bytes, span(prev))
+    end
+    accept!(b, kids[end])
+    return finish!(b, node)
+end
+
+# Collect the last `n` leaves of `node`, in reverse order, into `leaves`
+function last_leaves!(leaves::Vector{Node}, node::Node, n::Int)
+    if is_leaf(node)
+        push!(leaves, node)
+        return leaves
+    end
+    for kid in reverse(verified_kids(node))
+        length(leaves) == n && break
+        last_leaves!(leaves, kid, n)
+    end
+    return leaves
+end
+
+# Single space before the number of bits in `primitive type A  8 end`. The bits can be any
+# expression, e.g. `$(N)` in `@eval primitive type A $(N) end`. The space after it is
+# handled by `space_before_end`.
+function space_before_primitive_bits(ctx::Context, node::Node)
+    (kind(node) === K"primitive" && !is_leaf(node)) || return nothing
+    kids = verified_kids(node)
+    # The bits is the last kid before `end` that isn't whitespace or a comment
+    idx = findlast(x -> !(JuliaSyntax.is_whitespace(x) || kind(x) in KSet"Comment end"), kids)
+    (idx === nothing || idx < 3) && return nothing
+    bits = kids[idx]
+    b = NodeBuilder(ctx, node)
+    if kind(kids[idx - 1]) === K"Whitespace"
+        # The whitespace is a kid of this node, e.g. `primitive type A  8 end`
+        ws = kids[idx - 1]
+        (span(ws) > 1 && kind(kids[idx - 2]) !== K"Comment") || return nothing
+        for i in 1:(idx - 2)
+            accept!(b, kids[i])
+        end
+        emit!(b, ws_node(1), " ", span(ws))
+        accept!(b, bits)
+    elseif !is_leaf(bits) && kind(first_leaf(bits)) === K"Whitespace"
+        # The whitespace is the first leaf of the bits, e.g. the call in
+        # `primitive type A  N * 8 end`
+        ws = first_leaf(bits)
+        (span(ws) > 1 && kind(last_leaf(kids[idx - 1])) !== K"Comment") || return nothing
+        for i in 1:(idx - 1)
+            accept!(b, kids[i])
+        end
+        bytes = read_bytes(ctx, bits)
+        bytes′ = [UInt8(' '); @view(bytes[(span(ws) + 1):end])]
+        emit!(b, replace_first_leaf(bits, ws_node(1)), bytes′, span(bits))
+    else
+        return nothing
+    end
+    for i in (idx + 1):length(kids)
+        accept!(b, kids[i])
+    end
+    return finish!(b, node)
+end
+
+# Single space around `for` and `if` in generators and comprehensions. Newlines around the
+# keywords are left alone.
+function spaces_around_generator_keywords(ctx::Context, node::Node)
+    @assert kind(node) in KSet"generator filter" && !is_leaf(node)
+    kids = verified_kids(node)
+    b = NodeBuilder(ctx, node)
+    ws = ws_node(1)
+    for (i, kid) in pairs(kids)
+        prev_is_keyword = i > 1 && kind(kids[i - 1]) in KSet"for if" && is_leaf(kids[i - 1])
+        next_is_keyword = i < length(kids) && kind(kids[i + 1]) in KSet"for if" &&
+            is_leaf(kids[i + 1])
+        if (prev_is_keyword || next_is_keyword) && kind(kid) === K"Whitespace"
+            # Whitespace leaf before or after the keyword
+            if span(kid) == 1
+                accept!(b, kid)
+            else
+                emit!(b, ws, " ", span(kid))
+            end
+        elseif prev_is_keyword && !is_leaf(kid)
+            # In JuliaSyntax v1 the whitespace after the keyword is typically the first leaf
+            # of the next node (e.g. the first K"in" node of the K"iteration" node)
+            fl = first_leaf(kid)
+            if kind(fl) === K"Whitespace" && span(fl) != 1
+                replace_bytes!(ctx, " ", span(fl))
+                emit!(b, replace_first_leaf(kid, ws))
+            elseif !JuliaSyntax.is_whitespace(fl)
+                # e.g. `if(x)`: insert a space
+                emit!(b, ws, " ", 0)
+                accept!(b, kid)
+            else
+                accept!(b, kid)
+            end
+        elseif prev_is_keyword && !JuliaSyntax.is_whitespace(kid)
+            # Leaf directly after the keyword without whitespace in between
+            emit!(b, ws, " ", 0)
+            accept!(b, kid)
+        else
+            accept!(b, kid)
+        end
+    end
+    return finish!(b, node)
+end
+
 # Single space around keywords:
 # Both sides of: `where`, `do` (if followed by arguments)
 # Right hand side of: `mutable`, `struct`, `abstract`, `primitive`, `type`, `function` (if
-# named function), `if`, `elseif`, `catch` and `return` (if followed by something), local,
-# global, const
+# named function), `macro`, `if`, `elseif`, `catch` and `return` (if followed by something),
+# local, global, const, outer
 function spaces_around_keywords(ctx::Context, node::Node)
     is_leaf(node) && return nothing
     if kind(node) === K"for"
         return space_after_for(ctx, node)
     end
+    if kind(node) in KSet"generator filter"
+        return spaces_around_generator_keywords(ctx, node)
+    end
     if kind(node) in KSet"call dotcall macrocall"
         return space_before_do(ctx, node)
     end
     keyword_set = KSet"""
-    where do mutable struct abstract primitive type function if elseif catch while return
-    local global const module baremodule
+    where do mutable struct abstract primitive type function macro if elseif catch while
+    return local global const module baremodule outer
     """
     if !(kind(node) in keyword_set)
         return nothing
@@ -1341,6 +1670,53 @@ function for_loop_use_in(ctx::Context, node::Node)
     return make_node(node, kids′)
 end
 
+# Rebuild a macro module path node (e.g. `@Mod.Sub` from `@Mod.Sub.mac`) without the
+# leading `@` leaf. The stream is not touched here, the caller deletes the byte.
+function drop_leading_at(node::Node)
+    @assert !is_leaf(node) && kind(node) === K"."
+    kids = verified_kids(node)
+    kids′ = copy(kids)
+    if is_leaf(kids[1])
+        @assert kind(kids[1]) === K"@"
+        popfirst!(kids′)
+    else
+        kids′[1] = drop_leading_at(kids[1])
+    end
+    return make_node(node, kids′)
+end
+
+# Normalize `@Mod.mac` to `Mod.@mac` by moving the `@` from the front of the module path
+# to just before the macro name.
+function at_after_macro_module_path(ctx::Context, node::Node)
+    if !(kind(node) === K"." && !is_leaf(node) && kind(first_leaf(node)) === K"@")
+        return nothing
+    end
+    kids = verified_kids(node)
+    # Only the outermost `.` node (the one ending with the macro name) is rewritten.
+    # Nested `.` nodes of the module path are rebuilt as part of the outer one.
+    kind(kids[end]) === K"MacroName" || return nothing
+    @assert length(kids) in (3, 4) # ([@,] module path, `.`, MacroName)
+    @assert kind(kids[end - 1]) === K"."
+    b = NodeBuilder(ctx, node)
+    kid = kids[1]
+    if is_leaf(kid)
+        # `@Mod.mac`: drop the `@` leaf
+        @assert kind(kid) === K"@"
+        skip_kid!(b, kid)
+        accept!(b, kids[2])
+    else
+        # `@Mod.Sub.mac`: delete the `@` byte and rebuild the module path node
+        @assert kind(kid) === K"."
+        emit!(b, drop_leading_at(kid), "", 1)
+    end
+    # The `.` before the macro name
+    accept!(b, kids[end - 1])
+    # Insert the `@` before the macro name
+    emit!(b, Node(JuliaSyntax.SyntaxHead(K"@", JuliaSyntax.TRIVIA_FLAG), 1), "@", 0)
+    accept!(b, kids[end])
+    return finish!(b, node)
+end
+
 function braces_around_where_rhs(ctx::Context, node::Node)
     if !(kind(node) === K"where" && !is_leaf(node))
         return nothing
@@ -1373,6 +1749,229 @@ function braces_around_where_rhs(ctx::Context, node::Node)
     end
     emit!(b, rhs′)
     return finish!(b, node)
+end
+
+# Tag the call node in the signature of a function/macro definition with
+# TAG_FUNCTION_SIGNATURE so that rules operating on real calls (kwargs_after_semicolon)
+# can tell `f(x, a = 1) = g(y, b = 2)`'s signature call from its body call. The lineage
+# alone can't distinguish them: both have a K"function" parent and (for long form
+# signatures and short form bodies) a K"Whitespace" previous sibling.
+function tag_function_signature(ctx::Context, node::Node)
+    if !(kind(node) in KSet"function macro" && !is_leaf(node))
+        return nothing
+    end
+    kids = verified_kids(node)
+    local sig_idx::Int
+    if is_short_form_function_definition(node)
+        # The signature is the first kid: `f(x) = x`
+        sig_idx = 1
+    else
+        # The signature is the first non-whitespace kid after the keyword:
+        # `function f(x) ... end`
+        kw_idx = findfirst(x -> is_leaf(x) && kind(x) in KSet"function macro", kids)::Int
+        i = findnext(!JuliaSyntax.is_whitespace, kids, kw_idx + 1)
+        i === nothing && return nothing
+        sig_idx = i
+    end
+    sig′ = tag_signature_call(kids[sig_idx])
+    sig′ === nothing && return nothing
+    kids′ = copy(kids)
+    kids′[sig_idx] = sig′
+    return make_node(node, kids′)
+end
+
+# Walk down through K"::"/K"where"/K"parens" wrappers (`f(x)::T where {T}`) to the call
+# and tag it. Return the rebuilt node, or `nothing` if there is no call (e.g. `function f
+# end` or an anonymous function argument tuple) or if the call is already tagged.
+function tag_signature_call(node::Node)
+    if kind(node) in KSet"call dotcall"
+        has_tag(node, TAG_FUNCTION_SIGNATURE) && return nothing
+        return add_tag(node, TAG_FUNCTION_SIGNATURE)
+    elseif kind(node) in KSet":: where parens" && !is_leaf(node)
+        kids = verified_kids(node)
+        idx = findfirst(!JuliaSyntax.is_whitespace, kids)
+        idx === nothing && return nothing
+        kid′ = tag_signature_call(kids[idx])
+        kid′ === nothing && return nothing
+        kids′ = copy(kids)
+        kids′[idx] = kid′
+        return make_node(node, kids′)
+    else
+        return nothing
+    end
+end
+
+# A keyword argument written with a comma in a call, i.e. a K"=" kid of the call.
+# `a .= 1` is also K"=" (with the DOTOP_FLAG) but is a positional argument, and `a += 1`
+# is K"op=".
+function is_comma_kwarg(node::Node)
+    return kind(node) === K"=" && !JuliaSyntax.has_flags(node, JuliaSyntax.DOTOP_FLAG)
+end
+
+# Keyword arguments in calls are put after a `;`: `f(x, a = 1)` -> `f(x; a = 1)`. Only the
+# separator is changed, arguments are never reordered (Julia evaluates arguments in source
+# order) so calls where a positional argument comes after a keyword argument, e.g.
+# `f(a = 1, x)`, are left alone. Comma-kwargs are merged into an existing `;` group:
+# `f(x, a = 1; b = 2)` -> `f(x; a = 1, b = 2)`. Function definition signatures (tagged by
+# tag_function_signature), macro calls, tuples etc. are not calls and are not touched.
+function kwargs_after_semicolon(ctx::Context, node::Node)
+    if !(kind(node) in KSet"call dotcall" && !is_leaf(node) && !is_any_op_call(node)) ||
+            has_tag(node, TAG_FUNCTION_SIGNATURE)
+        return nothing
+    end
+    kids = verified_kids(node)
+    open_idx = findfirst(x -> kind(x) === K"(", kids)
+    open_idx === nothing && return nothing
+    close_idx = findnext(x -> kind(x) === K")", kids, open_idx + 1)::Int
+    # Find the first comma-kwarg, bail if there are none
+    first_kw_idx = findnext(is_comma_kwarg, kids, open_idx + 1)
+    (first_kw_idx === nothing || first_kw_idx > close_idx) && return nothing
+    # Check that all comma-kwargs come after all positional arguments: the only items
+    # after the first kwarg must be other kwargs or the K"parameters" node. In addition,
+    # there can be at most one K"parameters" node and it must be the last item. Note
+    # that the kids are already normalized so that trivia (whitespace, newlines, and
+    # comments) are direct siblings of the items.
+    params_idx = nothing
+    last_kw_idx = first_kw_idx
+    for i in first_kw_idx:(close_idx - 1)
+        kid = kids[i]
+        if is_comma_kwarg(kid)
+            params_idx === nothing || return nothing
+            last_kw_idx = i
+            # The keyword must be an identifier (or `var"..."`, or `$x` inside a quote).
+            # Anything else, e.g. `a::Int = 1`, is a lowering error so leave it alone.
+            lhs_idx = findfirst(!JuliaSyntax.is_whitespace, verified_kids(kid))::Int
+            kind(verified_kids(kid)[lhs_idx]) in KSet"Identifier var $" || return nothing
+        elseif kind(kid) === K"parameters"
+            params_idx === nothing || return nothing
+            params_idx = i
+        elseif is_list_item(kid)
+            # Positional argument after a keyword argument: reordering would be needed
+            return nothing
+        end
+    end
+    # Bail if there are `# runic: off/on` toggles among the kids
+    find_format_toggle_ranges(ctx, kids) === nothing || return nothing
+    # Bail if there are range formatting markers among the kids since the edits below
+    # can then not be guaranteed to be inside the requested range
+    if !isempty(ctx.line_ranges) &&
+            has_range_formatting_marker(ctx, kids, open_idx, close_idx)
+        return nothing
+    end
+    # Find the separator: the `,` before the first kwarg (which is replaced by `;`) or,
+    # when there are no positional arguments, the `(` (after which a `;` is inserted).
+    sep_idx = findprev(x -> kind(x) === K",", kids, first_kw_idx - 1)
+    has_positionals = sep_idx !== nothing && sep_idx > open_idx
+    if !has_positionals
+        sep_idx = open_idx
+    end
+    sep_idx = sep_idx::Int
+    # The new K"parameters" node contains the kids from after the separator up to and
+    # including the last kwarg and its trailing comma (skipping over any same-line
+    # trivia, matching what the parser does for `f(x; a = 1 #= c =#,)`).
+    params_end_idx = last_kw_idx
+    let i = last_kw_idx + 1
+        while i < close_idx && kind(kids[i]) in KSet"Whitespace Comment"
+            i += 1
+        end
+        if i < close_idx && kind(kids[i]) === K","
+            params_end_idx = i
+        end
+    end
+    has_trailing_comma = kind(kids[params_end_idx]) === K","
+    # Kids of an existing `;` group to merge in (excluding the `;` itself), if any
+    old_params_kids = params_idx === nothing ? nothing : verified_kids(kids[params_idx])
+    merge_old_params = old_params_kids !== nothing &&
+        count(is_list_item, old_params_kids) > 0
+
+    b = NodeBuilder(ctx, node)
+    # Accept everything before the separator
+    for i in 1:(sep_idx - 1)
+        accept!(b, kids[i])
+    end
+    semi = Node(JuliaSyntax.SyntaxHead(K";", JuliaSyntax.TRIVIA_FLAG), 1)
+    params_kids = Node[semi]
+    pos = position(ctx.fmt_io)
+    if has_positionals
+        # Replace the `,` with `;`
+        @assert kind(kids[sep_idx]) === K","
+        replace_bytes!(ctx, ";", span(kids[sep_idx]))
+    else
+        # Insert `;` after the `(`
+        @assert kind(kids[sep_idx]) === K"("
+        accept!(b, kids[sep_idx])
+        pos = position(ctx.fmt_io)
+        replace_bytes!(ctx, ";", 0)
+    end
+    accept_node!(ctx, semi)
+    # Move the comma-kwargs (and the trivia between them) into the parameters node. The
+    # bytes are already in place.
+    for i in (sep_idx + 1):params_end_idx
+        push!(params_kids, kids[i])
+        accept_node!(ctx, kids[i])
+    end
+    next_idx = params_end_idx + 1
+    if merge_old_params
+        # Merge with the existing `;` group: insert a `,` after the last kwarg (unless
+        # there already is one), keep the trivia between them, delete the old `;`, and
+        # append the old kids.
+        if !has_trailing_comma
+            comma = Node(JuliaSyntax.SyntaxHead(K",", JuliaSyntax.TRIVIA_FLAG), 1)
+            replace_bytes!(ctx, ",", 0)
+            push!(params_kids, comma)
+            accept_node!(ctx, comma)
+        end
+        for i in next_idx:(params_idx::Int - 1)
+            push!(params_kids, kids[i])
+            accept_node!(ctx, kids[i])
+        end
+        old_semi = old_params_kids[1]
+        @assert kind(old_semi) === K";"
+        replace_bytes!(ctx, "", span(old_semi))
+        for i in 2:length(old_params_kids)
+            push!(params_kids, old_params_kids[i])
+            accept_node!(ctx, old_params_kids[i])
+        end
+        next_idx = params_idx::Int + 1
+    end
+    # Emit the parameters node from the separator position
+    seek(ctx.fmt_io, pos)
+    emit!(b, Node(JuliaSyntax.SyntaxHead(K"parameters", 0), params_kids))
+    # Accept the remaining kids. An existing empty `;` group (`f(x, a = 1;)`) is dropped.
+    for i in next_idx:lastindex(kids)
+        if params_idx !== nothing && i == params_idx && !merge_old_params
+            skip_kid!(b, kids[i])
+        else
+            accept!(b, kids[i])
+        end
+    end
+    return finish!(b, node)
+end
+
+# Check whether any of the comment kids between the opening and closing indices is a
+# range formatting marker (see add_line_range_markers).
+function has_range_formatting_marker(
+        ctx::Context, kids::Vector{Node}, open_idx::Int, close_idx::Int
+    )
+    pos = position(ctx.fmt_io)
+    for i in 1:open_idx
+        accept_node!(ctx, kids[i])
+    end
+    found = false
+    for i in (open_idx + 1):(close_idx - 1)
+        kid = kids[i]
+        if kind(kid) === K"Comment"
+            str = String(read_bytes(ctx, kid))
+            if is_range_formatting_begin(str, ctx.range_formatting_begin) ||
+                    is_range_formatting_end(str, ctx.range_formatting_end)
+                found = true
+                break
+            end
+        end
+        accept_node!(ctx, kid)
+    end
+    seek(ctx.fmt_io, pos)
+    return found
 end
 
 function parens_around_op_calls_in_colon(ctx::Context, node::Node)
@@ -2103,6 +2702,44 @@ function indent_parens(ctx::Context, node::Node)
 end
 
 # TODO: This is not needed? NamedTuples?
+# Primitive type definitions have no body block, so the keywords are tagged directly to
+# indent the number of bits if it is on a separate line, e.g. `primitive type A\n8\nend`.
+# If the definition spans multiple lines the `end` keyword is put on a separate line.
+function indent_primitive(ctx::Context, node::Node)
+    @assert kind(node) === K"primitive"
+    kids = verified_kids(node)
+    primitive_idx = findfirst(x -> kind(x) === K"primitive", kids)::Int
+    @assert is_leaf(kids[primitive_idx])
+    end_idx = findlast(x -> kind(x) === K"end", kids)::Int
+    @assert is_leaf(kids[end_idx]) && end_idx == lastindex(kids)
+    is_multiline = any(
+        kid -> any_leaf(x -> kind(x) === K"NewlineWs", kid), @view(kids[1:(end_idx - 1)])
+    )
+    if is_multiline && kind(kids[end_idx - 1]) !== K"NewlineWs"
+        # Missing newline before `end`, e.g. `primitive type A\n8 end`. Replace the
+        # whitespace before `end`, if any, with a newline.
+        b = NodeBuilder(ctx, node)
+        for i in 1:(end_idx - 2)
+            accept!(b, kids[i])
+        end
+        if kind(kids[end_idx - 1]) === K"Whitespace"
+            emit!(b, nlws_node(1), "\n", span(kids[end_idx - 1]))
+        else
+            accept!(b, kids[end_idx - 1])
+            emit!(b, nlws_node(1), "\n", 0)
+        end
+        accept!(b, kids[end_idx])
+        return finish!(b, node)
+    end
+    any_kid_changed = tag_kid!(kids, primitive_idx, TAG_INDENT)
+    # Tag the newline just before the end keyword as pre-dedent
+    if kind(kids[end_idx - 1]) === K"NewlineWs"
+        any_kid_changed |= tag_kid!(kids, end_idx - 1, TAG_PRE_DEDENT)
+    end
+    any_kid_changed |= tag_kid!(kids, end_idx, TAG_DEDENT)
+    return any_kid_changed ? make_node(node, kids) : nothing
+end
+
 function indent_struct(ctx::Context, node::Node)
     @assert kind(node) === K"struct"
     kids = verified_kids(node)
@@ -2421,12 +3058,16 @@ function insert_delete_mark_newlines(ctx::Context, node::Node)
         return indent_tuple(ctx, node)
     elseif kind(node) === K"struct"
         return indent_struct(ctx, node)
+    elseif kind(node) === K"primitive"
+        return indent_primitive(ctx, node)
     elseif kind(node) === K"parens"
         return indent_parens(ctx, node)
     elseif kind(node) in KSet"curly braces bracescat"
         return indent_braces(ctx, node)
     elseif kind(node) in KSet"|| &&"
         return indent_short_circuit(ctx, node)
+    elseif kind(node) === K"-->"
+        return indent_op_call(ctx, node)
     elseif kind(node) in KSet"using import export public" || is_global_local_list(node)
         return indent_using_import_export_public(ctx, node)
     elseif kind(node) in KSet"local global"
@@ -2586,9 +3227,21 @@ function indent_multiline_strings(ctx::Context, node::Node)
     return finish!(b, node)
 end
 
-const re_fence_open = r"^(\h*)(`{3,})\h*(\{[A-Za-z0-9_-]*\}|[A-Za-z0-9_-]*)"
+# The language is the first word of the info string. A leading `@` is allowed so that
+# Documenter blocks (```@example, ```@repl, etc.) can be matched by name; any trailing
+# block name or options (```@example name; continued = true) are ignored.
+const re_fence_open = r"^(\h*)(`{3,})\h*(\{[A-Za-z0-9_-]*\}|@?[A-Za-z0-9_-]*)"
 
-is_julia_lang(lang::AbstractString) = lang in ("julia", "julia-repl", "jldoctest")
+# Fence languages (info string first word) that are treated as Julia code by default.
+# Documenter blocks are included for the ones that contain code which is evaluated when
+# building the documentation. The configuration blocks (e.g. `@meta`, `@docs`, `@autodocs`
+# and `@contents`) are also parsed as Julia code by Documenter but are left out since they
+# are mostly lists of names and options, and `@raw` blocks contain e.g. HTML.
+const DEFAULT_MARKDOWN_LANGUAGES = [
+    "julia", "julia-repl", "jldoctest", "@example", "@repl", "@setup", "@eval",
+]
+
+is_julia_lang(lang::AbstractString, languages::Vector{String}) = lang in languages
 
 # Markdown and Quarto markdown file extensions (case-insensitive, e.g. `README.MD`)
 function is_markdown_file(path::AbstractString)
@@ -2693,7 +3346,10 @@ end
 
 # Identify julia source code blocks (``` blocks four-space-indent blocks),
 # collect the lines, format the text and re-insert
-function format_markdown(s::String; line_ranges::Vector{UnitRange{Int}} = UnitRange{Int}[])
+function format_markdown(
+        s::String; line_ranges::Vector{UnitRange{Int}} = UnitRange{Int}[],
+        languages::Vector{String} = DEFAULT_MARKDOWN_LANGUAGES,
+    )
     lines = collect_lines(IOBuffer(s); keep = true)
     validate_line_ranges(lines, line_ranges)
     isempty(lines) && return s
@@ -2744,7 +3400,7 @@ function format_markdown(s::String; line_ranges::Vector{UnitRange{Int}} = UnitRa
                 continue
             end
             # Non-Julia fence: copy through unchanged
-            if !is_julia_lang(lang)
+            if !is_julia_lang(lang, languages)
                 append!(result, @view lines[i:close_i])
                 i = close_i + 1
                 at_boundary = false
@@ -2879,7 +3535,7 @@ function format_docstring_string(ctx::Context, node::Node)
 
     # Pass the extracted string to the markdown formatter
     content = String(content_bytes)
-    formatted = format_markdown(content)
+    formatted = format_markdown(content; languages = ctx.languages)
     seek(ctx.fmt_io, pos)
     content == formatted && return nothing
 

@@ -5,6 +5,109 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+ - Macro calls with a module path are now normalized to have the `@` after the module
+   path, directly in front of the macro name. This is a new formatting rule (not a
+   [spec-bug] fix) and will result in diffs like the following in already formatted code
+   that uses the `@`-first form:
+   ```diff
+   -@Mod.mac x
+   +Mod.@mac x
+
+   -@Mod.Sub.mac(x)
+   +Mod.Sub.@mac(x)
+   ```
+   ([#223], [#228])
+ - New rule: single space between the macro name and the arguments, and between the
+   arguments, in unparenthesized macro calls, e.g. `@enum  Foo   Bar  Baz` is formatted as
+   `@enum Foo Bar Baz` ([#172], [#222]).
+ - Keyword arguments in function calls are now separated from the positional arguments
+   with `;` instead of `,`, i.e. `f(x, a = 1)` is formatted as `f(x; a = 1)`. Arguments are
+   never reordered so this only applies when all keyword arguments come after all
+   positional arguments (e.g. `f(a = 1, x)` is left as is). Function definitions, macro
+   calls, tuples, etc. are not affected. This is a new formatting rule (not a [spec-bug]
+   fix) and will result in diffs like the following in essentially every call with
+   comma-separated keyword arguments in already formatted code:
+   ```diff
+   -f(a = 1)
+   -f(x, a = 1)
+   -f(x, a = 1; b = 2)
+   +f(; a = 1)
+   +f(x; a = 1)
+   +f(x; a = 1, b = 2)
+   ```
+   ([#33], [#231])
+
+### Changed
+ - Semicolons separating statements are now formatted without space before and with a
+   single space after, e.g. `a = 1;b = 2` and `a = 1  ;  b = 2` are formatted as
+   `a = 1; b = 2` ([#242]).
+ - Semicolons in concatenation syntax for arrays are now formatted without space before and
+   with a single space after, e.g. `[1 2;3 4]` and `[1 2 ; 3 4]` are formatted as
+   `[1 2; 3 4]` and `[a ;; b]` as `[a;; b]` ([#243]).
+ - Multiple spaces after prefix operators are now collapsed to a single space, e.g. `-  x`
+   is formatted as `- x` and `!  x` as `! x` ([#244]).
+ - A single space is now enforced before an `end` keyword on the same line as the code
+   before it, e.g. `struct A  end`, `begin  end` and `function f()end` are formatted as
+   `struct A end`, `begin end` and `function f() end` ([#245]).
+ - Leading and trailing spaces inside the brackets of comprehensions are now removed, e.g.
+   `[ x for x in X ]` is formatted as `[x for x in X]`, consistent with other listlike
+   expressions ([#246]).
+ - The `-->` operator is now formatted like other infix operators: spaces around it are
+   normalized (e.g. `a-->b` is formatted as `a --> b`) and continuation lines are indented
+   ([#247]).
+ - Extra whitespace after the `macro` keyword is now normalized to a single space (just
+   like for `function`), e.g. `macro  m()` is formatted as `macro m()` ([#248]).
+ - Spaces before splat `...` are now removed, e.g. `f(x ...)` is formatted as `f(x...)`
+   ([#249]).
+ - Spaces and newlines after `.` in field access and import paths are now removed, e.g.
+   `a. b` is formatted as `a.b` and `import A.\n    B` as `import A.B`. If there is a
+   comment after the `.` it is left as is ([#250]).
+ - Spaces around the short-circuiting operators `&&` and `||` (and the dotted versions
+   `.&&` and `.||`) are now normalized just like other infix operators, e.g. `a&&b||c` is
+   formatted as `a && b || c` ([#239]).
+ - Extra whitespace around the `for` and `if` keywords in generators and comprehensions is
+   now normalized to a single space, just like for `for` loops, e.g. `[x  for  x in X  if  y]`
+   is formatted as `[x for x in X if y]` ([#240]).
+ - Documenter blocks with code (```` ```@example ````,
+   ```` ```@repl ````, ```` ```@setup ````, and ```` ```@eval ````) are now formatted by
+   default in Markdown files and docstrings, in addition to the ```` ```julia ````,
+   ```` ```julia-repl ````, ```` ```jldoctest ````, and Quarto ```` ```{julia} ```` fences.
+   Trailing semicolons (used to suppress output) and `# hide` comments are preserved, and
+   blocks that do not parse on their own (e.g. `continued = true` blocks) are left as is.
+   This will result in diffs in Documenter sources that were previously not formatted. Use
+   `--languages=julia,julia-repl,jldoctest` to restore the previous behavior ([#235]).
+ - Multiline primitive type definitions are now indented, i.e. the number of bits on a
+   separate line is indented one level and the `end` keyword is put on a separate line,
+   e.g. `primitive type A\n8\nend` and `primitive type A\n8 end` are formatted as
+   `primitive type A\n    8\nend`. Extra whitespace before the number of bits in one-line
+   primitive type definitions is normalized to a single space, e.g.
+   `primitive type A  8 end` is formatted as `primitive type A 8 end` ([#254]).
+ - Extra whitespace after the `outer` keyword in `for` loops and generators is now
+   normalized to a single space, e.g. `for outer  i in I` is formatted as
+   `for outer i in I` ([#255]).
+
+## [v1.13.0] - 2026-10-07
+### Fixed
+ - Commas in iteration specifications of `for` loops and generators (e.g.
+   `for i in I, j in J` and `[i for i in I, j in J]`) now follow the same spacing rule as
+   other listlike expressions: no space before the comma and a single space after
+   ([#236], [#237]).
+
+## [v1.12.0] - 2026-10-02
+### Added
+ - New command line option `--languages=<lang>[,<lang>...]` for customizing which fenced
+   code block languages are treated as Julia code when formatting Markdown files and
+   docstrings (default: `julia,julia-repl,jldoctest`). This makes it possible to opt in to
+   formatting Documenter code blocks, e.g. with
+   `--languages=julia,julia-repl,jldoctest,@example,@repl,@setup,@eval`. The corresponding
+   `languages` keyword argument is also accepted by `Runic.format_string` and
+   `Runic.format_file`.
+ - `git-runic` now accepts the `--docstrings` and `--languages` options, with the same
+   meaning as for `runic`. The defaults can be configured with the `runic.docstrings` and
+   `runic.languages` git-config settings, analogous to the existing `runic.extensions`.
+
 ## [v1.11.1] - 2026-09-23
 ### Fixed
  - Formatting a parenthesized macro call followed by a `do` block (e.g.
@@ -279,8 +382,11 @@ First stable release of Runic.jl. See [README.md](README.md) for details and doc
 [v1.8.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.8.0
 [v1.9.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.9.0
 [v1.10.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.10.0
-[v1.11.1]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.11.1
 [v1.11.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.11.0
+[v1.11.1]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.11.1
+[v1.12.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.12.0
+[v1.13.0]: https://github.com/fredrikekre/Runic.jl/releases/tag/v1.13.0
+[#33]: https://github.com/fredrikekre/Runic.jl/issues/33
 [#97]: https://github.com/fredrikekre/Runic.jl/issues/97
 [#108]: https://github.com/fredrikekre/Runic.jl/issues/108
 [#109]: https://github.com/fredrikekre/Runic.jl/issues/109
@@ -312,6 +418,7 @@ First stable release of Runic.jl. See [README.md](README.md) for details and doc
 [#169]: https://github.com/fredrikekre/Runic.jl/issues/169
 [#170]: https://github.com/fredrikekre/Runic.jl/issues/170
 [#171]: https://github.com/fredrikekre/Runic.jl/issues/171
+[#172]: https://github.com/fredrikekre/Runic.jl/issues/172
 [#173]: https://github.com/fredrikekre/Runic.jl/issues/173
 [#174]: https://github.com/fredrikekre/Runic.jl/issues/174
 [#175]: https://github.com/fredrikekre/Runic.jl/issues/175
@@ -333,7 +440,27 @@ First stable release of Runic.jl. See [README.md](README.md) for details and doc
 [#213]: https://github.com/fredrikekre/Runic.jl/issues/213
 [#217]: https://github.com/fredrikekre/Runic.jl/issues/217
 [#219]: https://github.com/fredrikekre/Runic.jl/issues/219
+[#222]: https://github.com/fredrikekre/Runic.jl/issues/222
+[#223]: https://github.com/fredrikekre/Runic.jl/issues/223
 [#226]: https://github.com/fredrikekre/Runic.jl/issues/226
 [#227]: https://github.com/fredrikekre/Runic.jl/issues/227
+[#228]: https://github.com/fredrikekre/Runic.jl/issues/228
 [#229]: https://github.com/fredrikekre/Runic.jl/issues/229
 [#230]: https://github.com/fredrikekre/Runic.jl/issues/230
+[#231]: https://github.com/fredrikekre/Runic.jl/issues/231
+[#235]: https://github.com/fredrikekre/Runic.jl/issues/235
+[#236]: https://github.com/fredrikekre/Runic.jl/issues/236
+[#237]: https://github.com/fredrikekre/Runic.jl/issues/237
+[#239]: https://github.com/fredrikekre/Runic.jl/issues/239
+[#240]: https://github.com/fredrikekre/Runic.jl/issues/240
+[#242]: https://github.com/fredrikekre/Runic.jl/issues/242
+[#243]: https://github.com/fredrikekre/Runic.jl/issues/243
+[#244]: https://github.com/fredrikekre/Runic.jl/issues/244
+[#245]: https://github.com/fredrikekre/Runic.jl/issues/245
+[#246]: https://github.com/fredrikekre/Runic.jl/issues/246
+[#247]: https://github.com/fredrikekre/Runic.jl/issues/247
+[#248]: https://github.com/fredrikekre/Runic.jl/issues/248
+[#249]: https://github.com/fredrikekre/Runic.jl/issues/249
+[#250]: https://github.com/fredrikekre/Runic.jl/issues/250
+[#254]: https://github.com/fredrikekre/Runic.jl/issues/254
+[#255]: https://github.com/fredrikekre/Runic.jl/issues/255

@@ -7,19 +7,31 @@ using Test
 
 const GitRunic = Runic.GitRunic
 
+# Run `f` with a fresh temporary git repository as the working directory. The global and
+# system git configuration files are replaced with an empty file so that the tests do not
+# depend on the configuration of the host machine (e.g. `commit.gpgsign`, `init.templateDir`
+# or `core.autocrlf`).
 function with_repository(f; commit::Bool = true)
     return mktempdir() do dir
-        cd(dir) do
-            GitRunic.git(["init", "-q"])
-            GitRunic.git(["config", "user.email", "runic@example.com"])
-            GitRunic.git(["config", "user.name", "Runic Tests"])
-            GitRunic.git(["config", "core.autocrlf", "false"])
-            if commit
-                write("base.jl", "base = 1\n")
-                GitRunic.git(["add", "base.jl"])
-                GitRunic.git(["commit", "-qm", "initial"])
+        config = joinpath(dir, "gitconfig")
+        touch(config)
+        withenv(
+            "GIT_CONFIG_GLOBAL" => config, "GIT_CONFIG_SYSTEM" => config,
+            "GIT_CONFIG_NOSYSTEM" => "1",
+        ) do
+            repo = mkdir(joinpath(dir, "repo"))
+            cd(repo) do
+                GitRunic.git(["init", "-q"])
+                GitRunic.git(["config", "user.email", "runic@example.com"])
+                GitRunic.git(["config", "user.name", "Runic Tests"])
+                GitRunic.git(["config", "core.autocrlf", "false"])
+                if commit
+                    write("base.jl", "base = 1\n")
+                    GitRunic.git(["add", "base.jl"])
+                    GitRunic.git(["commit", "-qm", "initial"])
+                end
+                return f()
             end
-            return f()
         end
     end
 end
@@ -104,6 +116,65 @@ end
 
             @test GitRunic._main(["--staged", "--quiet", "--extensions=md"]) == 1
             @test GitRunic.git(["show", ":README.MD"]) == "```julia\nx = 2\n```"
+        end
+    end
+
+    @testset "--docstrings option and runic.docstrings config" begin
+        src = "\"\"\"\n```julia\nx=1\n```\n\"\"\"\nf(x) = x\n"
+        fmt = "\"\"\"\n```julia\nx = 1\n```\n\"\"\"\nf(x) = x"
+        with_repository() do
+            write("doc.jl", src)
+            GitRunic.git(["add", "doc.jl"])
+            # Docstrings are not formatted by default
+            @test GitRunic._main(["--staged", "--quiet"]) == 0
+            @test GitRunic._main(["--staged", "--quiet", "--docstrings"]) == 1
+            @test GitRunic.git(["show", ":doc.jl"]) == fmt
+        end
+        with_repository() do
+            write("doc.jl", src)
+            GitRunic.git(["add", "doc.jl"])
+            GitRunic.git(["config", "runic.docstrings", "yes"])
+            @test GitRunic._main(["--staged", "--quiet"]) == 1
+            @test GitRunic.git(["show", ":doc.jl"]) == fmt
+            GitRunic.git(["config", "runic.docstrings", "maybe"])
+            @test_throws Runic.MainError GitRunic._main(["--staged", "--quiet"])
+        end
+    end
+
+    @testset "--languages option and runic.languages config" begin
+        src = "```@example\nx=1\n```\n\n```julia\ny=2\n```\n"
+        with_repository() do
+            write("doc.md", src)
+            GitRunic.git(["add", "doc.md"])
+            # Documenter blocks are formatted by default
+            @test GitRunic._main(["--staged", "--quiet", "--extensions=md"]) == 1
+            @test GitRunic.git(["show", ":doc.md"]) == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```"
+            # ... and can be opted out of
+            write("doc.md", src)
+            GitRunic.git(["add", "doc.md"])
+            @test GitRunic._main(["--staged", "--quiet", "--extensions=md", "--languages=julia"]) == 1
+            @test GitRunic.git(["show", ":doc.md"]) == "```@example\nx=1\n```\n\n```julia\ny = 2\n```"
+            write("doc.md", src)
+            GitRunic.git(["add", "doc.md"])
+            @test GitRunic._main(
+                ["--staged", "--quiet", "--extensions=md", "--languages", "julia, @example"]
+            ) == 1
+            @test GitRunic.git(["show", ":doc.md"]) == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```"
+            # The list replaces the default
+            write("doc.md", src)
+            GitRunic.git(["add", "doc.md"])
+            @test GitRunic._main(["--staged", "--quiet", "--extensions=md", "--languages=@example"]) == 1
+            @test GitRunic.git(["show", ":doc.md"]) == "```@example\nx = 1\n```\n\n```julia\ny=2\n```"
+            @test_throws Runic.MainError GitRunic._main(["--staged", "--quiet", "--languages="])
+            @test_throws Runic.MainError GitRunic._main(["--staged", "--quiet", "--languages"])
+        end
+        with_repository() do
+            write("doc.md", src)
+            GitRunic.git(["add", "doc.md"])
+            GitRunic.git(["config", "runic.extensions", "md"])
+            GitRunic.git(["config", "runic.languages", "julia,@example"])
+            @test GitRunic._main(["--staged", "--quiet"]) == 1
+            @test GitRunic.git(["show", ":doc.md"]) == "```@example\nx = 1\n```\n\n```julia\ny = 2\n```"
         end
     end
 
