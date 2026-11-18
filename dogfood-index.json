@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "line": {
+    "repo": "nsiccha/Runic.jl",
+    "ref": "dogfood",
+    "sha": "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a"
+  },
+  "upstream": {
+    "repo": "fredrikekre/Runic.jl",
+    "ref": "v1.11.1",
+    "sha": "20e05bdd7ad00774cd1dee66d0bc82a16515952c"
+  },
+  "prepared_at": "2026-11-18T12:00:08Z",
+  "problems": [
+    {
+      "id": "multiline-range",
+      "role": "fix",
+      "title": "Formatting one line inside a multiline literal changes its value",
+      "summary": "A format range can put a marker inside a triple-quoted string or command. Indentation then changes inside the literal, including on repeated runs.",
+      "repairs": [],
+      "upstream_refs": [
+        {
+          "url": "https://github.com/fredrikekre/Runic.jl/issues/260",
+          "relation": "reports"
+        }
+      ],
+      "fix": {
+        "branch": "dogfood",
+        "commits": [
+          {
+            "sha": "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a",
+            "title": "Expand format ranges to cover whole multiline literals",
+            "original": [
+              "3efa0c13d1a3b33b7686d97b27b6ed3d017f674a"
+            ]
+          }
+        ],
+        "why_together": "The release backport includes the formatter change and regression tests. The master-based topic commit adds the same source and test lines on that base."
+      },
+      "depends_on": [],
+      "requires": [],
+      "validation": [
+        {
+          "base": "20e05bdd7ad00774cd1dee66d0bc82a16515952c",
+          "tests": [
+            "test/runtests.jl (complete, including --lines and git-runic integration)"
+          ],
+          "result": "passed",
+          "detail": "11,964 assertions passed and 16 pre-existing assertions were marked broken. All 47 --lines checks passed. Tested dogfood commit 3efa0c13d1a3b33b7686d97b27b6ed3d017f674a.",
+          "julia": "1.10.12"
+        }
+      ],
+      "draft": {
+        "title": "Formatting one line inside a multiline literal changes its value",
+        "body": "Save this file as `literal.jl` using the indentation shown.\n\n```julia\nbegin\n    s = \"\"\"\n    a\n    b\n    c\n    \"\"\"\nend\n```\n\nRun `runic --lines=4:4 --diff literal.jl` with unpatched Runic 1.11.1. Only the line containing `b` gains indentation. Applying the edit changes the value of `s`, and formatting the same line again shifts it further. The expected diff for this file is empty.\n\nExpand a selected range to the boundaries of any enclosing multiline string or command before inserting formatting markers. This keeps markers outside literal contents. Upstream issue #260 tracks the behavior.",
+        "prepared_at": "2026-11-18T12:00:08Z"
+      }
+    }
+  ]
+}
